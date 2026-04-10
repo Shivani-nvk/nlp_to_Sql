@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>NLP to SQL</title>
+<link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+<div class="main">
+
+<div class="logo">
+<h1>NLP to SQL Converter</h1>
+</div>
+
+<div class="input-box">
+
+<textarea id="userInput" placeholder="Type your question here..."></textarea>
+<br><br>
+
+<button onclick="showSQL()">Submit</button>
+
+</div>
+
+<div class="sql-box" id="sqlSection">
+
+<h3>Generated SQL Query</h3>
+<div class="query"></div>
+
+<br>
+<button onclick="showOutput()">Show Output</button>
+
+</div>
+
+<div class="output-box" id="outputSection">
+
+<h3>Query Result</h3>
+<table></table>
+
+</div>
+
+</div>
+
+<script src="script.js"></script>
+
+</body>
+</html>
