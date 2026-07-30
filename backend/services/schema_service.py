@@ -1,3 +1,5 @@
+from db import get_db_connection
+
 
 def get_schema():
     conn = get_db_connection()

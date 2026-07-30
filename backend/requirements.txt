@@ -1,0 +1,15 @@
+''' Just in case u forget abt password, there's no way to decrypt the password_hash ,
+ therefore do this in cmd and just update the password instead by creating a hash by using this : 
+
+ Paste this whole command:
+ python3 -c "from werkzeug.security import generate_password_hash; print(generate_password_hash('admin@123'))"
+
+ (change admin@123 to whichever password you actually want to hash)
+
+It prints one long string starting with scrypt:... — that's your hash
+
+UPDATE app_users
+SET password_hash = '<paste the scrypt:... string here>'
+WHERE username = 'admin1';
+
+  '''
