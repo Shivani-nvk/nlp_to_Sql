@@ -97,6 +97,14 @@
         <div class="prompt-row">
           <span class="prompt-caret">&gt;</span>
           <textarea id="userInput" placeholder="e.g. show top 5 students with highest marks" rows="2"></textarea>
+          <button type="button" class="mic-btn" id="micBtn" onclick="toggleMic()" title="Speak your question">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+              <line x1="12" y1="19" x2="12" y2="23"></line>
+              <line x1="8" y1="23" x2="16" y2="23"></line>
+            </svg>
+          </button>
         </div>
 
         <div class="console-actions">
@@ -146,7 +154,6 @@
         <button type="button" class="admin-tab active" data-tab="insert">Insert</button>
         <button type="button" class="admin-tab" data-tab="update">Update</button>
         <button type="button" class="admin-tab" data-tab="delete">Delete</button>
-        <button type="button" class="admin-tab" data-tab="columns">Columns</button>
       </div>
 
       <div class="field-row">
@@ -192,72 +199,6 @@
           </button>
           <span id="deleteStatus" class="status-text"></span>
         </div>
-      </div>
-
-      <!-- COLUMNS panel -->
-      <div class="admin-panel" id="adminPanelColumns" style="display:none;">
-
-        <h4 class="admin-subhead">Add column</h4>
-        <div class="field-row">
-          <label class="field-label" for="addColName">Column name</label>
-          <input type="text" id="addColName" class="field-input" placeholder="e.g. phone_number">
-        </div>
-        <div class="field-row">
-          <label class="field-label" for="addColType">Type</label>
-          <input type="text" id="addColType" class="field-input" placeholder="e.g. VARCHAR(255), INT, DATE">
-        </div>
-        <div class="field-row field-row-inline">
-          <label class="field-label">
-            <input type="checkbox" id="addColNullable"> Allow NULL
-          </label>
-        </div>
-        <div class="field-row">
-          <label class="field-label" for="addColDefault">Default value (optional)</label>
-          <input type="text" id="addColDefault" class="field-input">
-        </div>
-        <div class="console-actions">
-          <button class="btn btn-primary" onclick="submitAddColumn()">
-            <span class="btn-label">Add column</span>
-          </button>
-          <span id="addColumnStatus" class="status-text"></span>
-        </div>
-
-        <hr class="admin-divider">
-
-        <h4 class="admin-subhead">Rename / change type</h4>
-        <div class="field-row">
-          <label class="field-label" for="renameColSelect">Existing column</label>
-          <select id="renameColSelect" class="field-input"></select>
-        </div>
-        <div class="field-row">
-          <label class="field-label" for="renameColNewName">New name</label>
-          <input type="text" id="renameColNewName" class="field-input">
-        </div>
-        <div class="field-row">
-          <label class="field-label" for="renameColType">Type</label>
-          <input type="text" id="renameColType" class="field-input" placeholder="e.g. VARCHAR(255)">
-        </div>
-        <div class="console-actions">
-          <button class="btn btn-primary" onclick="submitUpdateColumn()">
-            <span class="btn-label">Update column</span>
-          </button>
-          <span id="updateColumnStatus" class="status-text"></span>
-        </div>
-
-        <hr class="admin-divider">
-
-        <h4 class="admin-subhead">Delete column</h4>
-        <div class="field-row">
-          <label class="field-label" for="deleteColSelect">Column</label>
-          <select id="deleteColSelect" class="field-input"></select>
-        </div>
-        <div class="console-actions">
-          <button class="btn btn-secondary" onclick="submitDeleteColumn()">
-            <span class="btn-label">Delete column</span>
-          </button>
-          <span id="deleteColumnStatus" class="status-text"></span>
-        </div>
-
       </div>
 
     </section>

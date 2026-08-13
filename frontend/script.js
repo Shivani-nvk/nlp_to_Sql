@@ -157,6 +157,70 @@ function submitAuth() {
     });
 }
 
+// ---------------- VOICE INPUT ----------------
+
+const micBtn = document.getElementById("micBtn");
+const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+let recognition = null;
+let isListening = false;
+
+if (SpeechRecognitionAPI) {
+  recognition = new SpeechRecognitionAPI();
+  recognition.lang = "en-US";
+  recognition.continuous = false;    // auto-stop after a pause in speech
+  recognition.interimResults = true; // show text live while still talking
+
+  recognition.onstart = () => {
+    isListening = true;
+    micBtn.classList.add("listening");
+    setStatus("Listening...", false);
+  };
+
+  recognition.onresult = (event) => {
+    let transcript = "";
+    for (let i = 0; i < event.results.length; i++) {
+      transcript += event.results[i][0].transcript;
+    }
+    userInput.value = transcript;
+  };
+
+  recognition.onerror = (event) => {
+    setStatus(`Mic error: ${event.error}`, true);
+  };
+
+  recognition.onend = () => {
+    isListening = false;
+    micBtn.classList.remove("listening");
+    if (statusText.textContent === "Listening...") {
+      setStatus("", false);
+    }
+    userInput.focus();
+  };
+} else {
+  micBtn.disabled = true;
+  micBtn.title = "Voice input isn't supported in this browser. Try Chrome or Edge.";
+}
+
+function toggleMic() {
+  if (!recognition) return;
+
+  if (isListening) {
+    recognition.stop();
+  } else {
+    userInput.value = "";
+    recognition.start();
+  }
+}
+
+// Press Enter to run the query, Shift+Enter for a new line
+userInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    showSQL();
+  }
+});
+
 // ---------------- CHIPS (existing behaviour) ----------------
 
 document.getElementById("chips").addEventListener("click", (e) => {
@@ -269,8 +333,6 @@ function loadAdminPanel() {
       schemaCache = schema;
 
       const select = document.getElementById("adminTableSelect");
-      const previouslySelected = select.value;
-
       select.innerHTML = "";
       Object.keys(schema)
         .filter((table) => !ADMIN_HIDDEN_TABLES.includes(table))
@@ -280,11 +342,6 @@ function loadAdminPanel() {
           opt.textContent = table;
           select.appendChild(opt);
         });
-
-      // Keep the same table selected across a schema refresh, if it still exists
-      if (previouslySelected && schema[previouslySelected]) {
-        select.value = previouslySelected;
-      }
 
       renderAdminFields();
     })
@@ -327,24 +384,6 @@ function renderAdminFields() {
 
   buildFields("insertFields", "insert");
   buildFields("updateFields", "update");
-
-  // Column dropdowns for the Columns tab (id excluded - it's the primary
-  // key and can't be renamed or dropped through this panel)
-  const fillColumnSelect = (selectId) => {
-    const select = document.getElementById(selectId);
-    if (!select) return;
-    select.innerHTML = "";
-    Object.keys(columns).forEach((col) => {
-      if (col === "id") return;
-      const opt = document.createElement("option");
-      opt.value = col;
-      opt.textContent = `${col} (${columns[col]})`;
-      select.appendChild(opt);
-    });
-  };
-
-  fillColumnSelect("renameColSelect");
-  fillColumnSelect("deleteColSelect");
 }
 
 document.getElementById("adminTabs")?.addEventListener("click", (e) => {
@@ -358,7 +397,6 @@ document.getElementById("adminTabs")?.addEventListener("click", (e) => {
   document.getElementById("adminPanelInsert").style.display = tab === "insert" ? "block" : "none";
   document.getElementById("adminPanelUpdate").style.display = tab === "update" ? "block" : "none";
   document.getElementById("adminPanelDelete").style.display = tab === "delete" ? "block" : "none";
-  document.getElementById("adminPanelColumns").style.display = tab === "columns" ? "block" : "none";
 });
 
 function collectFields(containerId) {
@@ -463,121 +501,6 @@ function submitDelete() {
     })
     .catch((error) => {
       setAdminStatus("deleteStatus", "Couldn't reach the backend.", true);
-      console.log(error);
-    });
-}
-
-// ---------------- ADMIN PANEL: COLUMN MANAGEMENT ----------------
-
-function submitAddColumn() {
-  const table = document.getElementById("adminTableSelect").value;
-  const column_name = document.getElementById("addColName").value.trim();
-  const column_type = document.getElementById("addColType").value.trim();
-  const nullable = document.getElementById("addColNullable").checked;
-  const defaultVal = document.getElementById("addColDefault").value;
-
-  if (!column_name || !column_type) {
-    setAdminStatus("addColumnStatus", "Enter a column name and type.", true);
-    return;
-  }
-
-  setAdminStatus("addColumnStatus", "Adding column...", false);
-
-  fetch(API_BASE + "/admin/column/add", {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify({
-      table,
-      column_name,
-      column_type,
-      nullable,
-      default: defaultVal || null
-    })
-  })
-    .then((r) => r.json().then((body) => ({ ok: r.ok, body })))
-    .then(({ ok, body }) => {
-      if (!ok || body.error) {
-        setAdminStatus("addColumnStatus", body.error || "Add column failed.", true);
-        return;
-      }
-      setAdminStatus("addColumnStatus", `Added column '${column_name}'.`, false);
-      document.getElementById("addColName").value = "";
-      document.getElementById("addColType").value = "";
-      document.getElementById("addColDefault").value = "";
-      loadAdminPanel(); // refresh schema everywhere (insert/update forms too)
-    })
-    .catch((error) => {
-      setAdminStatus("addColumnStatus", "Couldn't reach the backend.", true);
-      console.log(error);
-    });
-}
-
-function submitUpdateColumn() {
-  const table = document.getElementById("adminTableSelect").value;
-  const old_name = document.getElementById("renameColSelect").value;
-  const new_name = document.getElementById("renameColNewName").value.trim();
-  const column_type = document.getElementById("renameColType").value.trim();
-
-  if (!old_name || !new_name || !column_type) {
-    setAdminStatus("updateColumnStatus", "Fill in new name and type.", true);
-    return;
-  }
-
-  setAdminStatus("updateColumnStatus", "Updating column...", false);
-
-  fetch(API_BASE + "/admin/column/update", {
-    method: "PUT",
-    headers: authHeaders(),
-    body: JSON.stringify({ table, old_name, new_name, column_type })
-  })
-    .then((r) => r.json().then((body) => ({ ok: r.ok, body })))
-    .then(({ ok, body }) => {
-      if (!ok || body.error) {
-        setAdminStatus("updateColumnStatus", body.error || "Update failed.", true);
-        return;
-      }
-      setAdminStatus("updateColumnStatus", `Updated column '${old_name}' -> '${new_name}'.`, false);
-      document.getElementById("renameColNewName").value = "";
-      document.getElementById("renameColType").value = "";
-      loadAdminPanel();
-    })
-    .catch((error) => {
-      setAdminStatus("updateColumnStatus", "Couldn't reach the backend.", true);
-      console.log(error);
-    });
-}
-
-function submitDeleteColumn() {
-  const table = document.getElementById("adminTableSelect").value;
-  const column_name = document.getElementById("deleteColSelect").value;
-
-  if (!column_name) {
-    setAdminStatus("deleteColumnStatus", "Pick a column.", true);
-    return;
-  }
-
-  if (!confirm(`Delete column '${column_name}' from '${table}'? This drops the data in it permanently.`)) {
-    return;
-  }
-
-  setAdminStatus("deleteColumnStatus", "Deleting column...", false);
-
-  fetch(API_BASE + "/admin/column/delete", {
-    method: "DELETE",
-    headers: authHeaders(),
-    body: JSON.stringify({ table, column_name })
-  })
-    .then((r) => r.json().then((body) => ({ ok: r.ok, body })))
-    .then(({ ok, body }) => {
-      if (!ok || body.error) {
-        setAdminStatus("deleteColumnStatus", body.error || "Delete failed.", true);
-        return;
-      }
-      setAdminStatus("deleteColumnStatus", `Deleted column '${column_name}'.`, false);
-      loadAdminPanel();
-    })
-    .catch((error) => {
-      setAdminStatus("deleteColumnStatus", "Couldn't reach the backend.", true);
       console.log(error);
     });
 }
