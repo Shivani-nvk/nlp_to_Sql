@@ -154,6 +154,7 @@
         <button type="button" class="admin-tab active" data-tab="insert">Insert</button>
         <button type="button" class="admin-tab" data-tab="update">Update</button>
         <button type="button" class="admin-tab" data-tab="delete">Delete</button>
+        <button type="button" class="admin-tab" data-tab="column">Add Column</button>
       </div>
 
       <div class="field-row">
@@ -198,6 +199,38 @@
             <span class="btn-label">Delete row</span>
           </button>
           <span id="deleteStatus" class="status-text"></span>
+        </div>
+      </div>
+
+      <!-- ADD COLUMN panel -->
+      <div class="admin-panel" id="adminPanelColumn" style="display:none;">
+        <div class="field-row">
+          <label class="field-label" for="newColumnName">Column name</label>
+          <input type="text" id="newColumnName" class="field-input" placeholder="e.g. bonus">
+        </div>
+
+        <div class="field-row">
+          <label class="field-label" for="newColumnType">Column type</label>
+          <input type="text" id="newColumnType" class="field-input" placeholder="e.g. VARCHAR(255), INT, DATE">
+        </div>
+
+        <div class="field-row">
+          <label class="field-label" for="newColumnDefault">Default value (optional)</label>
+          <input type="text" id="newColumnDefault" class="field-input">
+        </div>
+
+        <div class="field-row field-row-checkbox">
+          <label class="field-label checkbox-label">
+            <input type="checkbox" id="newColumnNullable" checked>
+            Allow NULL
+          </label>
+        </div>
+
+        <div class="console-actions">
+          <button class="btn btn-primary" onclick="submitAddColumn()">
+            <span class="btn-label">Add column</span>
+          </button>
+          <span id="columnStatus" class="status-text"></span>
         </div>
       </div>
 

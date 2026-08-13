@@ -333,6 +333,8 @@ function loadAdminPanel() {
       schemaCache = schema;
 
       const select = document.getElementById("adminTableSelect");
+      const previouslySelected = select.value;
+
       select.innerHTML = "";
       Object.keys(schema)
         .filter((table) => !ADMIN_HIDDEN_TABLES.includes(table))
@@ -342,6 +344,12 @@ function loadAdminPanel() {
           opt.textContent = table;
           select.appendChild(opt);
         });
+
+      // keep the same table selected across a refresh (e.g. after adding
+      // a column) instead of always resetting to the first option
+      if (previouslySelected && schema[previouslySelected]) {
+        select.value = previouslySelected;
+      }
 
       renderAdminFields();
     })
@@ -397,6 +405,7 @@ document.getElementById("adminTabs")?.addEventListener("click", (e) => {
   document.getElementById("adminPanelInsert").style.display = tab === "insert" ? "block" : "none";
   document.getElementById("adminPanelUpdate").style.display = tab === "update" ? "block" : "none";
   document.getElementById("adminPanelDelete").style.display = tab === "delete" ? "block" : "none";
+  document.getElementById("adminPanelColumn").style.display = tab === "column" ? "block" : "none";
 });
 
 function collectFields(containerId) {
@@ -501,6 +510,58 @@ function submitDelete() {
     })
     .catch((error) => {
       setAdminStatus("deleteStatus", "Couldn't reach the backend.", true);
+      console.log(error);
+    });
+}
+
+// ---------------- ADD COLUMN ----------------
+
+function submitAddColumn() {
+  const table = document.getElementById("adminTableSelect").value;
+  const column_name = document.getElementById("newColumnName").value.trim();
+  const column_type = document.getElementById("newColumnType").value.trim();
+  const nullable = document.getElementById("newColumnNullable").checked;
+  const defaultVal = document.getElementById("newColumnDefault").value.trim();
+
+  if (!column_name || !column_type) {
+    setAdminStatus("columnStatus", "Enter a column name and type.", true);
+    return;
+  }
+
+  setAdminStatus("columnStatus", "Adding column...", false);
+
+  fetch(API_BASE + "/admin/column/add", {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({
+      table,
+      column_name,
+      column_type,
+      nullable,
+      default: defaultVal || null
+    })
+  })
+    .then((r) => r.json().then((body) => ({ ok: r.ok, body })))
+    .then(({ ok, body }) => {
+      if (!ok || body.error) {
+        setAdminStatus("columnStatus", body.error || "Add column failed.", true);
+        return;
+      }
+
+      setAdminStatus("columnStatus", `Column '${column_name}' added to '${table}'.`, false);
+
+      // clear the form
+      document.getElementById("newColumnName").value = "";
+      document.getElementById("newColumnType").value = "";
+      document.getElementById("newColumnDefault").value = "";
+      document.getElementById("newColumnNullable").checked = true;
+
+      // refresh schema cache + Insert/Update fields so the new column
+      // shows up immediately without a page reload
+      loadAdminPanel();
+    })
+    .catch((error) => {
+      setAdminStatus("columnStatus", "Couldn't reach the backend.", true);
       console.log(error);
     });
 }
