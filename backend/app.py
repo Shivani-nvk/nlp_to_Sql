@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from routes.query import query_bp
 from routes.auth import auth_bp
 from routes.admin import admin_bp
+from routes.refine import refine_bp  # NEW: query refinement / feedback chatbot
 from services.schema_service import get_schema
 
 # Step 0: Load .env (must happen before reading os.environ below)
@@ -26,6 +27,7 @@ jwt = JWTManager(app)
 app.register_blueprint(query_bp)
 app.register_blueprint(auth_bp)
 app.register_blueprint(admin_bp)
+app.register_blueprint(refine_bp)  # NEW
 
 # Step 4: Home route
 @app.route("/")

@@ -18,8 +18,27 @@ const userBadge = document.getElementById("userBadge");
 const userBadgeText = document.getElementById("userBadgeText");
 const adminSection = document.getElementById("adminSection");
 
+// Chatbot/feedback DOM refs - declared up here with everything else
+// (not down near the bottom) because resetConsoleState() -> resetChat()
+// can run synchronously during page load (via showApp() when a token
+// already exists in localStorage). Declaring these as `const` further
+// down the file caused a ReferenceError/TDZ crash the last time this
+// happened - see the "Add Column" panel bug from before. Keep all
+// shared DOM consts together at the top from now on.
+const chatLog = document.getElementById("chatLog");
+const chatSatisfaction = document.getElementById("chatSatisfaction");
+const chatFeedbackInput = document.getElementById("chatFeedbackInput");
+const chatFeedbackText = document.getElementById("chatFeedbackText");
+const chatStatusText = document.getElementById("chatStatusText");
+
 let lastSQL = "";
 let authMode = "login"; // or "signup"
+
+// ---------------- CHATBOT / FEEDBACK STATE ----------------
+// originalQuestion + lastSQL together are all the "context" the refinement
+// endpoint needs. There's no server-side session for this - the frontend
+// just keeps sending the latest SQL back with each round of feedback.
+let originalQuestion = "";
 
 // ---------------- AUTH STATE ----------------
 
@@ -46,12 +65,15 @@ function clearSession() {
 function resetConsoleState() {
   userInput.value = "";
   lastSQL = "";
+  originalQuestion = "";
   window.resultData = null;
   setStatus("", false);
   document.getElementById("sqlSection").style.display = "none";
   document.getElementById("outputSection").style.display = "none";
   document.querySelector(".query").innerText = "";
   document.querySelector("table").innerHTML = "";
+  document.getElementById("chatSection").style.display = "none";
+  resetChat();
 }
 
 function showApp() {
@@ -284,10 +306,14 @@ function showSQL() {
       setStatus("Done.", false);
 
       lastSQL = data.sql || "";
+      originalQuestion = question;
       document.getElementById("sqlSection").style.display = "block";
       document.querySelector(".query").innerText = lastSQL;
 
       window.resultData = data.data;
+
+      resetChat();
+      document.getElementById("chatSection").style.display = "block";
     })
     .catch((error) => {
       runBtn.disabled = false;
@@ -593,4 +619,118 @@ function showOutput() {
   document.getElementById("rowCount").textContent =
     data.length + (data.length === 1 ? " row" : " rows");
   document.querySelector("table").innerHTML = table;
+}
+
+// ---------------- QUERY FEEDBACK CHATBOT ----------------
+// Flow: Yes/No satisfaction prompt -> (if No) free-text feedback ->
+// POST /query/refine -> updated SQL/output rendered -> prompt again.
+// This never re-runs the original NLP-to-SQL parser; it sends the
+// PREVIOUS SQL + the new feedback to a separate refinement endpoint.
+
+function resetChat() {
+  if (!chatLog) return;
+  chatLog.innerHTML = "";
+  chatFeedbackText.value = "";
+  setChatStatus("", false);
+  chatSatisfaction.style.display = "block";
+  chatFeedbackInput.style.display = "none";
+}
+
+function setChatStatus(message, isError) {
+  chatStatusText.textContent = message;
+  chatStatusText.classList.toggle("is-error", Boolean(isError));
+}
+
+function appendChatMessage(text, role) {
+  // role: "bot" or "user" or "error"
+  const bubble = document.createElement("div");
+  bubble.className = `chat-msg chat-msg-${role}`;
+  bubble.textContent = text;
+  chatLog.appendChild(bubble);
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+function handleSatisfaction(satisfied) {
+  if (satisfied) {
+    appendChatMessage("Glad that worked! Let me know if you need anything else.", "bot");
+    chatSatisfaction.style.display = "none";
+    chatFeedbackInput.style.display = "none";
+    return;
+  }
+
+  appendChatMessage("What would you like to change, or what's incorrect?", "bot");
+  chatSatisfaction.style.display = "none";
+  chatFeedbackInput.style.display = "block";
+  chatFeedbackText.focus();
+}
+
+function submitChatFeedback() {
+  const feedback = chatFeedbackText.value.trim();
+
+  if (!feedback) {
+    setChatStatus("Type what you'd like to change first.", true);
+    return;
+  }
+
+  if (!lastSQL) {
+    setChatStatus("There's no previous query to refine yet.", true);
+    return;
+  }
+
+  const token = getToken();
+  if (!token) {
+    showAuthScreen();
+    setAuthStatus("Please log in first.", true);
+    return;
+  }
+
+  appendChatMessage(feedback, "user");
+  chatFeedbackText.value = "";
+  setChatStatus("Refining query...", false);
+
+  fetch(API_BASE + "/query/refine", {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({
+      previous_sql: lastSQL,
+      feedback: feedback
+    })
+  })
+    .then((response) => response.json().then((data) => ({ status: response.status, data })))
+    .then(({ status, data }) => {
+      if (status === 401) {
+        clearSession();
+        showAuthScreen();
+        setAuthStatus("Your session expired. Please log in again.", true);
+        return;
+      }
+
+      if (data.error) {
+        setChatStatus("", false);
+        appendChatMessage(data.error, "error");
+        // keep the feedback box open so the user can try rephrasing
+        return;
+      }
+
+      // Success: update the SQL panel + output table with the refined query
+      lastSQL = data.sql || lastSQL;
+      document.querySelector(".query").innerText = lastSQL;
+      window.resultData = data.data;
+      showOutput();
+
+      setChatStatus("", false);
+      const changeSummary = (data.applied_changes && data.applied_changes.length)
+        ? `Updated: ${data.applied_changes.join(", ")}.`
+        : "Updated the query.";
+      appendChatMessage(changeSummary, "bot");
+
+      // ask again
+      appendChatMessage("Does this query and output satisfy you?", "bot");
+      chatFeedbackInput.style.display = "none";
+      chatSatisfaction.style.display = "block";
+    })
+    .catch((error) => {
+      setChatStatus("Couldn't reach the backend. Is the Flask server running?", true);
+      console.log(error);
+    });
 }

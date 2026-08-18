@@ -144,6 +144,33 @@
       </div>
     </section>
 
+    <!-- Query feedback chatbot: appears after a query has been run, asks
+         whether the result is satisfactory, and lets the user refine it
+         with follow-up feedback instead of re-typing the whole question. -->
+    <section class="chat-box" id="chatSection" style="display:none;">
+      <div class="panel-head">
+        <h3>Refine this result</h3>
+      </div>
+
+      <div class="chat-log" id="chatLog"></div>
+
+      <div class="chat-satisfaction" id="chatSatisfaction">
+        <p class="chat-prompt">Does this query and output satisfy you?</p>
+        <div class="chat-satisfaction-buttons">
+          <button type="button" class="btn btn-primary btn-small" onclick="handleSatisfaction(true)">Yes</button>
+          <button type="button" class="btn btn-ghost btn-small" onclick="handleSatisfaction(false)">No</button>
+        </div>
+      </div>
+
+      <div class="chat-feedback-input" id="chatFeedbackInput" style="display:none;">
+        <textarea id="chatFeedbackText" rows="2" placeholder="e.g. only show name and marks / sort by salary descending / show only employees from Bangalore"></textarea>
+        <div class="console-actions">
+          <button type="button" class="btn btn-primary btn-small" onclick="submitChatFeedback()">Send</button>
+          <span id="chatStatusText" class="status-text"></span>
+        </div>
+      </div>
+    </section>
+
     <!-- Admin panel -->
     <section class="admin-box" id="adminSection" style="display:none;">
       <div class="panel-head">

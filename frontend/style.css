@@ -554,6 +554,86 @@ tr:hover td {
   cursor: pointer;
 }
 
+/* ---------------- query feedback chatbot ---------------- */
+
+.chat-box {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 28px;
+}
+
+.chat-log {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.chat-log:empty {
+  margin-bottom: 0;
+}
+
+.chat-msg {
+  max-width: 85%;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  line-height: 1.5;
+  font-family: var(--font-mono);
+}
+
+.chat-msg-bot {
+  align-self: flex-start;
+  background: var(--panel-alt);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.chat-msg-user {
+  align-self: flex-end;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-dim);
+  color: var(--text);
+}
+
+.chat-msg-error {
+  align-self: flex-start;
+  background: rgba(229, 97, 90, 0.12);
+  border: 1px solid var(--error);
+  color: var(--error);
+}
+
+.chat-prompt {
+  margin: 0 0 10px;
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.chat-satisfaction-buttons {
+  display: flex;
+  gap: 10px;
+}
+
+.chat-feedback-input textarea {
+  width: 100%;
+  background: var(--panel-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  color: var(--text);
+  outline: none;
+  resize: vertical;
+  transition: border-color 0.15s ease;
+}
+
+.chat-feedback-input textarea:focus {
+  border-color: var(--accent);
+}
+
 /* ---------------- mic button (voice input) ---------------- */
 
 .mic-btn {

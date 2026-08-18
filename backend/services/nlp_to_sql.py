@@ -13,7 +13,7 @@ INTENT_MAP = {
     "total": "count",
 }
 
-SELECT_INTENT_WORDS = ["show", "display", "list"]
+SELECT_INTENT_WORDS = ["show", "display", "list", "get", "find"]
 
 # ---------------- AGGREGATE MAP ----------------
 
@@ -594,6 +594,25 @@ def convert_to_sql(question):
             table = tables_found_union[0]
             union_second_table = tables_found_union[1]
 
+    # Implicit union: "employees and students ...", "employee and student
+    # ..." with no explicit "union" keyword and no join/relationship word
+    # (JOIN_TRIGGER_WORDS) - this is asking for rows from BOTH tables, not
+    # a filter and not a join (there's no shared key being matched). Only
+    # fires when a table word is directly followed by "and" then another,
+    # DIFFERENT table word, and only if union/join weren't already picked
+    # up above - keeps this narrow so it doesn't misfire on unrelated
+    # sentences that merely mention two table names.
+    if union_second_table is None and second_table is None:
+        for i, word in enumerate(tokens):
+            if word == "and" and 0 < i < len(tokens) - 1:
+                left, right = tokens[i - 1], tokens[i + 1]
+                if left in TABLE_MAP and right in TABLE_MAP:
+                    t1, t2 = TABLE_MAP[left], TABLE_MAP[right]
+                    if t1 != t2:
+                        table = t1
+                        union_second_table = t2
+                        break
+
     # ---------------- INTENT ----------------
 
     for word in tokens:
@@ -1034,11 +1053,22 @@ def convert_to_sql(question):
                 end_idx = i
                 break
 
+        # A value immediately followed by its own category name -
+        # "bangalore CITY", "hr DEPARTMENT", "male GENDER" - is the value
+        # being described, not that column being requested. Without this,
+        # "get name of employees from bangalore city" would incorrectly
+        # select both name AND city, when only name was actually asked for.
+        DESCRIPTOR_VALUE_LISTS = {"city": CITIES, "department": DEPARTMENTS, "gender": GENDERS}
+
         for i, word in enumerate(tokens[intent_word_idx + 1:end_idx], start=intent_word_idx + 1):
             if i in join_related_indices:
                 continue
             if word in COLUMN_MAP:
                 col = COLUMN_MAP[word]
+                prev_word = tokens[i - 1] if i > 0 else None
+                value_list = DESCRIPTOR_VALUE_LISTS.get(col)
+                if value_list is not None and prev_word in value_list:
+                    continue
                 if col not in selected_columns:
                     selected_columns.append(col)
 
@@ -1278,19 +1308,47 @@ def convert_to_sql(question):
 
     # ---------------- UNION QUERY ----------------
 
+    # Columns (and WHERE conditions, further below) that actually exist on
+    # BOTH students and employees - same set the JOIN logic already treats
+    # as the only safe cross-table columns (see SHARED_COLUMN above). Kept
+    # as an ordered list (not a set) so the default "show everything safe"
+    # case below always renders columns in the same, predictable order.
+    UNION_SHARED_COLUMNS = ["id", "name", "age", "gender", "city"]
+
     if union_second_table:
 
         # SELECT * across two differently-shaped tables would break a UNION
-        # (mismatched column counts), so fall back to "name" - the one
-        # column both students and employees share - when no explicit
-        # columns were requested.
-        union_cols = select_columns_sql if select_columns_sql != "*" else "name"
+        # (mismatched column counts). If specific columns were genuinely
+        # requested, keep only the ones valid on both sides (e.g. "marks"
+        # or "salary" only exist on one table and would error out on the
+        # other). If NOTHING was requested (or nothing requested survived
+        # that filter), default to every column common to both tables -
+        # as close to "show everything" as a UNION can safely get, rather
+        # than an arbitrary single column.
+        if selected_columns:
+            safe_cols = [c for c in selected_columns if c in UNION_SHARED_COLUMNS]
+        else:
+            safe_cols = []
+        union_cols = ", ".join(safe_cols) if safe_cols else ", ".join(UNION_SHARED_COLUMNS)
+
         union_keyword = "UNION ALL" if union_all else "UNION"
 
+        # Only reuse WHERE conditions built on columns common to both
+        # tables (city/gender/age/name/id) - department, marks, salary,
+        # subject, joining_year, etc. are table-specific and would error
+        # out on whichever side of the UNION doesn't have that column.
+        union_safe_conditions = [
+            c for c in conditions
+            if c.split(" ")[0] in UNION_SHARED_COLUMNS
+        ]
+        union_where = ""
+        if union_safe_conditions:
+            union_where = " WHERE " + " AND ".join(union_safe_conditions)
+
         return f"""
-        SELECT {union_cols} FROM {table}
+        SELECT {union_cols} FROM {table}{union_where}
         {union_keyword}
-        SELECT {union_cols} FROM {union_second_table}
+        SELECT {union_cols} FROM {union_second_table}{union_where}
         """.strip()
 
     # ---------------- CASE QUERY ----------------
