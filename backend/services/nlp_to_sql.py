@@ -1464,6 +1464,28 @@ def convert_to_sql(question):
         if group_by_column:
             select_cols = f"{group_by_column}, {select_cols}"
 
+        # "average salary of top 4 employees", "sum of marks of bottom 3
+        # students", etc: the aggregate should run over just the top/bottom
+        # N rows (ranked by numeric_column), not the whole table. A plain
+        # LIMIT on the outer aggregate query wouldn't do anything - an
+        # aggregate always collapses the result to a single row - so this
+        # needs a subquery: rank + limit first, then aggregate over that
+        # subset. Only applies when there's no GROUP BY; "top N rows
+        # overall" and "grouped by department/city/etc" are two different
+        # requests that don't currently combine.
+        if record_condition in ("highest", "lowest") and limit_value and not group_by_column:
+            sort_dir = "DESC" if record_condition == "highest" else "ASC"
+            subquery = (
+                f"SELECT * FROM {table}"
+                f"{where_clause}"
+                f" ORDER BY {numeric_column} {sort_dir}"
+                f" LIMIT {limit_value}"
+            )
+            return f"""
+            SELECT {select_cols}
+            FROM ({subquery}) AS top_rows
+            """.strip()
+
         return f"""
         SELECT {select_cols}
         FROM {table}
