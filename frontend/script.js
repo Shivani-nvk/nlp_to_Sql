@@ -475,6 +475,70 @@ function submitInsert() {
     });
 }
 
+// ---------------- UPDATE TAB: AUTO-FILL FROM ROW ID ----------------
+// As soon as a Row ID is entered (on blur, or pressing Enter in the
+// field), fetch that row from the new GET /admin/row endpoint and fill
+// every field in the Update form with its current value. The user then
+// only has to touch the field(s) they actually want to change - anything
+// left alone still gets sent back with its original value in
+// collectFields(), so "leave it alone" and "explicitly set it back to
+// what it already was" both work out to the same harmless UPDATE.
+//
+// A column that's genuinely NULL in the DB is filled in as an empty
+// string, which matches collectFields()'s existing "blank = don't
+// include this column in the UPDATE" behaviour - so a NULL column stays
+// untouched (still NULL) unless the user types something into it.
+
+function fetchRowForUpdate() {
+  const tableSelect = document.getElementById("adminTableSelect");
+  const idInput = document.getElementById("updateId");
+  if (!tableSelect || !idInput) return;
+
+  const table = tableSelect.value;
+  const id = idInput.value.trim();
+
+  if (!id) return;
+
+  setAdminStatus("updateStatus", "Loading row...", false);
+
+  const url = `${API_BASE}/admin/row?table=${encodeURIComponent(table)}&id=${encodeURIComponent(id)}`;
+
+  fetch(url, {
+    method: "GET",
+    headers: authHeaders()
+  })
+    .then((r) => r.json().then((body) => ({ ok: r.ok, body })))
+    .then(({ ok, body }) => {
+      if (!ok || body.error) {
+        setAdminStatus("updateStatus", body.error || "Couldn't find that row.", true);
+        return;
+      }
+
+      const row = body.row || {};
+
+      document.querySelectorAll("#updateFields [data-column]").forEach((input) => {
+        const col = input.dataset.column;
+        const val = row[col];
+        input.value = (val === null || val === undefined) ? "" : val;
+      });
+
+      setAdminStatus("updateStatus", "Row loaded - edit only what you want to change.", false);
+    })
+    .catch((error) => {
+      setAdminStatus("updateStatus", "Couldn't reach the backend.", true);
+      console.log(error);
+    });
+}
+
+document.getElementById("updateId")?.addEventListener("blur", fetchRowForUpdate);
+
+document.getElementById("updateId")?.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    fetchRowForUpdate();
+  }
+});
+
 function submitUpdate() {
   const table = document.getElementById("adminTableSelect").value;
   const id = document.getElementById("updateId").value;

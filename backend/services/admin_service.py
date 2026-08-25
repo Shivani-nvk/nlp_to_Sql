@@ -32,6 +32,44 @@ def _validate_table_and_columns(table, columns):
     return None
 
 
+def get_row(table, row_id):
+    """
+    Fetches a single row by id, for the admin panel's Update tab to
+    auto-fill the form. Returns {"success": True, "row": {...}} with every
+    column (id included) as a plain dict, or {"error": ...}.
+
+    Same off-limits/validation posture as the other admin functions -
+    app_users can't be read through this either, and an unknown table is
+    rejected before any SQL is built.
+    """
+    if table in EXCLUDED_TABLES:
+        return {"error": f"'{table}' can't be modified through this form."}
+
+    schema = get_schema()
+    if table not in schema:
+        return {"error": f"Unknown table '{table}'."}
+
+    if "id" not in schema[table]:
+        return {"error": f"Table '{table}' has no 'id' column."}
+
+    sql = f"SELECT * FROM `{table}` WHERE id = %s"
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        cursor.execute(sql, [row_id])
+        row = cursor.fetchone()
+        if row is None:
+            return {"error": f"No row with id {row_id} in '{table}'."}
+        return {"success": True, "row": row}
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        cursor.close()
+        conn.close()
+
+
 def insert_row(table, data):
     if not data:
         return {"error": "No data provided."}

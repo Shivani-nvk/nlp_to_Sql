@@ -10,6 +10,10 @@ re-run the NLP parser. Instead it:
      feedback, reusing the same vocabulary dictionaries as nlp_to_sql.py
      (TABLE_MAP, COLUMN_MAP, CITIES, DEPARTMENTS, GENDERS, SORT_DIRECTION_MAP)
      so "Bangalore", "HR", "descending", etc. are recognised consistently.
+     It also reuses nlp_to_sql.py's words_to_numbers() and
+     merge_comparison_phrases() helpers, so English number words ("two",
+     "one hundred") and >=/<= phrasings ("at least", "2 or more") are
+     understood the same way here as in the main NLP parser.
   3. Rebuilds a new SQL string from the edited dict.
 
 Scope / known limitation: only "simple" SELECT ... FROM <table> [WHERE ...]
@@ -31,6 +35,8 @@ from services.nlp_to_sql import (
     GENDERS,
     SORT_DIRECTION_MAP,
     CATEGORICAL_COLUMNS,
+    words_to_numbers,
+    merge_comparison_phrases,
 )
 
 DEFAULT_NUMERIC_COLUMN = {
@@ -144,6 +150,21 @@ SORT_WORDS = {"sort", "order", "arrange", "ascending", "descending", "asc", "des
 SWAP_TRIGGERS = {"instead", "meant", "not"}
 LIMIT_WORDS = {"top", "limit", "first"}
 
+# Words that signal "more than N rows per group" - i.e. a HAVING COUNT(*)
+# filter, as opposed to a WHERE filter on an individual row's value.
+# Deliberately does NOT reuse nlp_to_sql.py's CONDITION_MAP: that map's
+# "above"/"below"/"greater"/"less" are about a single row's numeric column
+# (e.g. "marks above 80"), while this is specifically about the size of a
+# group after GROUP BY - keeping them separate avoids the two rules ever
+# fighting over the same word in different contexts.
+HAVING_GTE_WORDS = {"more", "greater", "above", "over"}
+HAVING_LTE_WORDS = {"less", "fewer", "below", "under"}
+# Words that signal the feedback is actually about group *size* (row count)
+# rather than, say, a plain numeric filter on a column - only fires the
+# HAVING rule when one of these also appears, so "salary above 50000"
+# (a WHERE filter) is never mistaken for a group-count filter.
+HAVING_SCOPE_WORDS = {"students", "employees", "rows", "records", "entries", "count", "count(*)"}
+
 
 def _extract_columns(tokens):
     cols = []
@@ -159,6 +180,15 @@ def apply_feedback(ctx, feedback_text):
 
     text = feedback_text.lower().strip()
     tokens = word_tokenize(text)
+    # Same normalization the main NLP parser applies, so "two", "one
+    # hundred", "at least", "3 or more" etc. are understood identically
+    # here as they are in nlp_to_sql.py - run BEFORE any rule below scans
+    # for digits or comparison words, for the same reason nlp_to_sql.py
+    # runs them first (later rules would otherwise fire on the individual
+    # words a phrase is built from, e.g. "least" alone, before the phrase
+    # is collapsed).
+    tokens = words_to_numbers(tokens)
+    tokens = merge_comparison_phrases(tokens)
     applied = []
 
     # 1. Table swap - "employees instead of students", "I meant employees not students"
@@ -233,6 +263,37 @@ def apply_feedback(ctx, feedback_text):
             ctx["where"] = []
             applied.append("cleared all filters")
 
+    # 4.5. HAVING / group-count filter - "subjects with more than 2
+    # students", "only show departments where count is at least 3", etc.
+    # Only makes sense when the query already has a GROUP BY (i.e. we're
+    # filtering groups, not individual rows) - so this can never attach an
+    # invalid HAVING to a non-grouped query. Also requires a
+    # HAVING_SCOPE_WORDS hit (students/employees/rows/records/count) so a
+    # plain row-level filter like "salary above 50000" is never mistaken
+    # for a group-size filter.
+    if ctx["group_by"] and any(w in tokens for w in HAVING_SCOPE_WORDS):
+        num = None
+        for w in tokens:
+            if w.isdigit():
+                num = w  # last digit wins, matching the same convention
+                # nlp_to_sql.py's generic number scan uses
+
+        op = None
+        if "AT_LEAST" in tokens:
+            op = ">="
+        elif "AT_MOST" in tokens:
+            op = "<="
+        elif any(w in tokens for w in HAVING_GTE_WORDS):
+            op = ">"
+        elif any(w in tokens for w in HAVING_LTE_WORDS):
+            op = "<"
+
+        if num and op:
+            ctx["having"] = f"COUNT(*) {op} {num}"
+            if ctx["select"] != ["*"] and "COUNT(*)" not in ctx["select"]:
+                ctx["select"].append("COUNT(*)")
+            applied.append(f"added group filter: COUNT(*) {op} {num}")
+
     # 5. Categorical filters - city / department / gender
     #    "it" is deliberately excluded unless "department"/"dept" is also
     #    present - otherwise ordinary pronouns ("make it better", "fix it")
@@ -270,7 +331,8 @@ def apply_feedback(ctx, feedback_text):
             "Couldn't confidently tell what to change from that feedback. "
             "Try something specific, e.g. 'only show name and marks', "
             "'sort by salary descending', 'show only employees from "
-            "Bangalore', or 'remove the department filter'."
+            "Bangalore', 'subjects with more than 2 students', or "
+            "'remove the department filter'."
         )
 
     return ctx, applied

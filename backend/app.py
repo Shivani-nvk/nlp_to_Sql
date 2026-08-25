@@ -19,6 +19,13 @@ app = Flask(__name__)
 # Step 2: Enable CORS (AFTER app creation)
 CORS(app)
 
+# Step 2.2: Preserve column/key order in JSON responses. Flask alphabetizes
+# JSON object keys by default, which was silently reordering query result
+# columns (e.g. "SELECT name, marks" coming back as marks-before-name in
+# the response) regardless of the SELECT order. Column order is meaningful
+# here - users pick it explicitly via NLP/refine feedback - so this is off.
+app.json.sort_keys = False
+
 # Step 2.5: JWT config
 app.config["JWT_SECRET_KEY"] = os.environ.get("JWT_SECRET_KEY")
 jwt = JWTManager(app)

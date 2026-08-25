@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt
 from services.admin_service import (
-    insert_row, update_row, delete_row,
+    get_row, insert_row, update_row, delete_row,
     add_column, rename_or_modify_column, drop_column
 )
 
@@ -15,6 +15,29 @@ def _require_admin():
     if claims.get("role") != "admin":
         return jsonify({"error": "Admin access required."}), 403
     return None
+
+
+@admin_bp.route("/row", methods=["GET"])
+@jwt_required()
+def admin_get_row():
+    """
+    GET /admin/row?table=employees&id=19
+    Used by the Update tab to auto-fill the form as soon as a row ID is
+    entered, so fields the user doesn't touch keep their existing value
+    instead of being sent as blank/unchanged-by-omission.
+    """
+    forbidden = _require_admin()
+    if forbidden:
+        return forbidden
+
+    table = request.args.get("table")
+    row_id = request.args.get("id")
+
+    if not table or row_id is None or row_id == "":
+        return jsonify({"error": "Request must include 'table' and 'id' query params."}), 400
+
+    result = get_row(table, row_id)
+    return jsonify(result), (200 if result.get("success") else 400)
 
 
 @admin_bp.route("/insert", methods=["POST"])
