@@ -40,11 +40,15 @@ CONDITION_MAP = {
     "greater": "above",
     "more": "above",
     "over": "above",
+    ">": "above",
+    ">=": "on_or_after",
 
     "below": "below",
     "less": "below",
     "lesser": "below",
     "under": "below",
+    "<": "below",
+    "<=": "on_or_before",
 
     "highest": "highest",
     "top": "highest",
@@ -57,6 +61,7 @@ CONDITION_MAP = {
     "equal": "equal",
     "equals": "equal",
     "is": "equal",
+    "=": "equal",
 
     "before": "below",
     "after": "above",
@@ -96,7 +101,23 @@ TABLE_MAP = {
     "employee": "employees",
     "employees": "employees",
     "emp": "employees",
-    "staff": "employees"
+    "staff": "employees",
+
+    "department": "departments",
+    "departments": "departments",
+    "dept": "departments",
+
+    "course": "courses",
+    "courses": "courses",
+
+    "teacher": "teachers",
+    "teachers": "teachers",
+
+    "enrollment": "enrollments",
+    "enrollments": "enrollments",
+
+    "attendance_record": "attendance",   # to avoid clash with students.attendance
+    "attendance_records": "attendance"
 }
 
 # ---------------- COLUMN MAP ----------------
@@ -123,15 +144,47 @@ COLUMN_MAP = {
     "years": "joining_year",
     "joining_year": "joining_year",
 
+    # departments
+    "department_id": "departments.department_id",
+    "department_name": "departments.department_name",
+    "dept_name": "departments.department_name",
+    "location": "departments.location",
+
+    # courses
+    "course_id": "courses.course_id",
+    "course_name": "courses.course_name",
+    "credits": "courses.credits",
+    # FKs (we’ll expose them as plain columns for simple filters)
+    "department_id": "courses.department_id",   # already covered; keep if you want plain
+    "teacher_id": "courses.teacher_id",
+
+    # teachers
+    "teacher_id": "teachers.teacher_id",
+    "teacher_name": "teachers.teacher_name",
+    "email": "teachers.email",
+    "teacher_department_id": "teachers.department_id",
+
+    # enrollments
+    "enrollment_id": "enrollments.enrollment_id",
+    "student_id": "enrollments.student_id",
+    "course_id": "enrollments.course_id",
+    "enrollment_date": "enrollments.enrollment_date",
+    "grade": "enrollments.grade",
+
+    # attendance (log)
+    "attendance_id": "attendance.attendance_id",
+    "att_student_id": "attendance.student_id",
+    "att_course_id": "attendance.course_id",
+    "attendance_date": "attendance.attendance_date",
+    "status": "attendance.status",
+    # alias for the summary column already in students:
+    "attendance_pct": "students.attendance",
+
     # common
     "id": "id",
     "ids": "id",
     "age": "age",
     "ages": "age",
-    "department": "department",
-    "departments": "department",
-    "dept": "department",
-    "depts": "department",
     "name": "name",
     "names": "name",
     "city": "city",
@@ -143,6 +196,9 @@ COLUMN_MAP = {
 # columns that should never be treated as the "numeric_column" used in
 # aggregates / above / below / equal / highest / lowest
 CATEGORICAL_COLUMNS = ["department", "city", "gender", "name", "subject"]
+
+# Tables that have a 'city' column (used for shared-column joins)
+TABLES_WITH_CITY = {"students", "employees"}
 
 # ---------------- DEPARTMENTS ----------------
 
@@ -200,8 +256,8 @@ JOIN_TYPE_MAP = {
     "inner": "INNER JOIN",
     "left": "LEFT JOIN",
     "right": "RIGHT JOIN",
-    "outer": "LEFT JOIN",   # MySQL has no FULL OUTER JOIN; LEFT JOIN is the closest safe default
-    "full": "LEFT JOIN",
+    "outer": "FULL OUTER",   # Special marker for full outer join simulation
+    "full": "FULL OUTER",    # Special marker for full outer join simulation
     "cross": "CROSS JOIN",
 }
 
@@ -211,6 +267,25 @@ JOIN_TYPE_MAP = {
 # real schema); city is the most meaningful one to match students and
 # employees on by default when no join column is stated explicitly.
 SHARED_COLUMN = "city"
+
+# ---------------- RELATIONSHIPS ----------------
+# Format: (local_table, local_col, foreign_table, foreign_col)
+RELATIONSHIPS = [
+    # courses → departments
+    ("courses", "department_id", "departments", "department_id"),
+    # courses → teachers
+    ("courses", "teacher_id", "teachers", "teacher_id"),
+    # teachers → departments
+    ("teachers", "department_id", "departments", "department_id"),
+    # enrollments → students
+    ("enrollments", "student_id", "students", "id"),
+    # enrollments → courses
+    ("enrollments", "course_id", "courses", "course_id"),
+    # attendance → students
+    ("attendance", "student_id", "students", "id"),
+    # attendance → courses
+    ("attendance", "course_id", "courses", "course_id"),
+]
 
 # ---------------- NULL ----------------
 
@@ -414,6 +489,7 @@ def merge_comparison_phrases(tokens):
         ("more", "than", "or", "equal", "to"),
         ("or", "more"),
         ("or", "greater"),
+        (">", "="),
     ]
     AT_MOST_PHRASES = [
         ("at", "most"),
@@ -425,6 +501,7 @@ def merge_comparison_phrases(tokens):
         ("lesser", "than", "or", "equal", "to"),
         ("or", "less"),
         ("or", "fewer"),
+        ("<", "="),
     ]
 
     # longest phrases first, so e.g. "...or more than" matches whole
@@ -476,6 +553,7 @@ def convert_to_sql(question):
 
     numeric_column = None
     condition_column = None
+    column_aliases = {}
 
     department_values = []
     city_values = []
@@ -497,6 +575,8 @@ def convert_to_sql(question):
     like_negated = False
 
     conditions = []
+    selected_columns = []  # list of column name strings for UNION section
+    selected = []  # list of (column, source_table) tuples
 
     # ---------------- SUBJECT DETECTION ----------------
 
@@ -517,9 +597,59 @@ def convert_to_sql(question):
     table_word_idx = None
 
     for i, word in enumerate(tokens):
-        if word in TABLE_MAP and table_word_idx is None:
-            table = TABLE_MAP[word]
+        # Check for dotted table names (e.g., students.name)
+        table_key = word
+        if '.' in word:
+            parts = word.split('.')
+            if len(parts) == 2 and parts[0] in TABLE_MAP:
+                table_key = parts[0]
+        if table_key in TABLE_MAP and table_word_idx is None:
+            table = TABLE_MAP[table_key]
             table_word_idx = i
+
+    # If no explicit table was mentioned, infer table from column references
+    if table_word_idx is None:
+        # Count column references per table to determine most likely table
+        table_column_counts = {}
+        for word in tokens:
+            # Check for dotted column names (e.g., students.name)
+            col_key = word
+            prefix_table = None
+            if '.' in word:
+                parts = word.split('.')
+                if len(parts) == 2:
+                    if parts[0] in TABLE_MAP:
+                        prefix_table = TABLE_MAP[parts[0]]
+                    if parts[1] in COLUMN_MAP:
+                        col_key = parts[1]
+            if col_key in COLUMN_MAP:
+                column = COLUMN_MAP[col_key]
+                # Determine which table this column belongs to
+                if prefix_table is not None:
+                    # Use the table indicated by the prefix
+                    table_name = prefix_table
+                else:
+                    # Determine which table this column belongs to based on column name
+                    if column in ["marks", "attendance", "semester", "subject", "blood_groupp"]:
+                        table_name = "students"
+                    elif column in ["salary", "experience", "joining_year", "department", "age", "gender", "city", "id", "name"]:
+                        # These columns exist in both tables
+                        if column in ["salary", "experience", "joining_year", "department"]:
+                            # Strongly associated with employees
+                            table_name = "employees"
+                        else:
+                            # For shared columns (age, gender, city, id, name), default to students
+                            # but we'll use tie-breaking logic later if needed
+                            table_name = "students"
+                    else:
+                        # Default fallback
+                        table_name = "students"
+
+                table_column_counts[table_name] = table_column_counts.get(table_name, 0) + 1
+
+        # Select the table with the most column references
+        if table_column_counts:
+            table = max(table_column_counts, key=table_column_counts.get)
 
     # ---------------- SECOND TABLE / JOIN ----------------
 
@@ -536,8 +666,14 @@ def convert_to_sql(question):
     if any(w in tokens for w in JOIN_TRIGGER_WORDS):
         tables_found = []
         for word in tokens:
-            if word in TABLE_MAP and TABLE_MAP[word] not in tables_found:
-                tables_found.append(TABLE_MAP[word])
+            # Check for dotted table names (e.g., students.name)
+            table_key = word
+            if '.' in word:
+                parts = word.split('.')
+                if len(parts) == 2 and parts[0] in TABLE_MAP:
+                    table_key = parts[0]
+            if table_key in TABLE_MAP and TABLE_MAP[table_key] not in tables_found:
+                tables_found.append(TABLE_MAP[table_key])
 
         if len(tables_found) >= 2:
             table = tables_found[0]
@@ -578,11 +714,25 @@ def convert_to_sql(question):
                             join_related_indices.add(j)
                         j -= 1
 
+            # If no specific join columns were mentioned, use the defined relationships
+            if not join_columns:
+                # Look for a relationship between the two tables
+                for local_table, local_col, foreign_table, foreign_col in RELATIONSHIPS:
+                    if (local_table == table and foreign_table == second_table) or \
+                       (local_table == second_table and foreign_table == table):
+                        # Found a relationship, use the appropriate columns
+                        if local_table == table and foreign_table == second_table:
+                            join_columns.append(local_col)
+                        else:
+                            join_columns.append(foreign_col)
+                        break
+
     # ---------------- UNION ----------------
 
     union_second_table = None
     union_all = False
 
+    # Explicit union detection (for the word "union")
     if any(w in tokens for w in UNION_TRIGGER_WORDS):
         union_all = "all" in tokens
         tables_found_union = []
@@ -594,24 +744,47 @@ def convert_to_sql(question):
             table = tables_found_union[0]
             union_second_table = tables_found_union[1]
 
-    # Implicit union: "employees and students ...", "employee and student
-    # ..." with no explicit "union" keyword and no join/relationship word
-    # (JOIN_TRIGGER_WORDS) - this is asking for rows from BOTH tables, not
-    # a filter and not a join (there's no shared key being matched). Only
-    # fires when a table word is directly followed by "and" then another,
-    # DIFFERENT table word, and only if union/join weren't already picked
-    # up above - keeps this narrow so it doesn't misfire on unrelated
-    # sentences that merely mention two table names.
-    if union_second_table is None and second_table is None:
-        for i, word in enumerate(tokens):
-            if word == "and" and 0 < i < len(tokens) - 1:
-                left, right = tokens[i - 1], tokens[i + 1]
-                if left in TABLE_MAP and right in TABLE_MAP:
-                    t1, t2 = TABLE_MAP[left], TABLE_MAP[right]
-                    if t1 != t2:
-                        table = t1
-                        union_second_table = t2
-                        break
+    # Implicit table detection: if we haven't found a second table yet and we are not doing an explicit union,
+    # look for two distinct table names in the tokens and only treat as a join if a join column can be found.
+    if second_table is None and union_second_table is None:
+        table_names = []
+        for word in tokens:
+            if word in TABLE_MAP:
+                table_names.append(TABLE_MAP[word])
+        # Remove duplicates while preserving order
+        seen = set()
+        distinct = []
+        for t in table_names:
+            if t not in seen:
+                seen.add(t)
+                distinct.append(t)
+        if len(distinct) >= 2:
+            # Try to find a join column between the first two distinct tables
+            cand_table = distinct[0]
+            cand_second = distinct[1]
+            join_cols = []
+            # 1) Check defined relationships
+            for local_table, local_col, foreign_table, foreign_col in RELATIONSHIPS:
+                if (local_table == cand_table and foreign_table == cand_second) or \
+                   (local_table == cand_second and foreign_table == cand_table):
+                    if local_table == cand_table and foreign_table == cand_second:
+                        join_cols.append(local_col)
+                    else:
+                        join_cols.append(foreign_col)
+                    break
+            # 2) If no relationship, check if both tables have the shared column (city)
+            if not join_cols:
+                if cand_table in TABLES_WITH_CITY and cand_second in TABLES_WITH_CITY:
+                    join_cols = [SHARED_COLUMN]
+            # If we found at least one join column, set up the join
+            if join_cols:
+                table = cand_table
+                second_table = cand_second
+                join_type = "INNER JOIN"   # default join type
+                join_columns = join_cols
+                # No specific trigger word, so join_trigger_idx remains None
+                # join_related_indices stays empty (no trigger token to skip)
+            # If no join column found, we do NOT set second_table (leave as None) to avoid invalid joins
 
     # ---------------- INTENT ----------------
 
@@ -634,8 +807,14 @@ def convert_to_sql(question):
     # a query using both doesn't let one silently overwrite the other.
 
     for i, word in enumerate(tokens):
-        if word in CONDITION_MAP:
-            mapped = CONDITION_MAP[word]
+        # Check for dotted column names (e.g., employees.salary)
+        col_key = word
+        if '.' in word:
+            parts = word.split('.')
+            if len(parts) == 2 and parts[1] in COLUMN_MAP:
+                col_key = parts[1]
+        if col_key in CONDITION_MAP:
+            mapped = CONDITION_MAP[col_key]
 
             if mapped in RECORD_CONDITION_TYPES:
                 record_condition = mapped
@@ -707,11 +886,16 @@ def convert_to_sql(question):
     # These can differ (e.g. "average salary ... since 2015" aggregates
     # salary but filters on joining_year), so they're resolved independently.
 
-    numeric_candidates = [
-        (i, COLUMN_MAP[word])
-        for i, word in enumerate(tokens)
-        if word in COLUMN_MAP and COLUMN_MAP[word] not in CATEGORICAL_COLUMNS
-    ]
+    numeric_candidates = []
+    for i, word in enumerate(tokens):
+        # Check for dotted column names (e.g., employees.salary)
+        col_key = word
+        if '.' in word:
+            parts = word.split('.')
+            if len(parts) == 2 and parts[1] in COLUMN_MAP:
+                col_key = parts[1]
+        if col_key in COLUMN_MAP and COLUMN_MAP[col_key] not in CATEGORICAL_COLUMNS:
+            numeric_candidates.append((i, COLUMN_MAP[col_key]))
 
     def nearest_column(anchor_idx):
         if anchor_idx is None or not numeric_candidates:
@@ -856,6 +1040,34 @@ def convert_to_sql(question):
             next_word = tokens[idx + 1]
             if next_word in COLUMN_MAP:
                 null_column = COLUMN_MAP[next_word]
+
+    # ---------------- NO TABLE (for relationships) ----------------
+    no_table = None
+    if "no" in tokens:
+        idx = tokens.index("no")
+        if idx + 1 < len(tokens):
+            next_word = tokens[idx + 1]
+            if next_word in TABLE_MAP:
+                no_table = TABLE_MAP[next_word]
+
+    if no_table and no_table != table:
+        # Find a relationship between table and no_table
+        found = False
+        for local_table, local_col, foreign_table, foreign_col in RELATIONSHIPS:
+            if local_table == no_table and foreign_table == table:
+                # no_table has a foreign key to table
+                conditions.append(f"NOT EXISTS (SELECT 1 FROM {no_table} WHERE {no_table}.{local_col} = {table}.{foreign_col})")
+                found = True
+                break
+            elif local_table == table and foreign_table == no_table:
+                # table has a foreign key to no_table
+                conditions.append(f"NOT EXISTS (SELECT 1 FROM {no_table} WHERE {no_table}.{foreign_col} = {table}.{local_col})")
+                found = True
+                break
+        if not found:
+            # Fallback: try to use SHARED_COLUMN? But we don't know.
+            # For now, do nothing and maybe the query will be wrong.
+            pass
 
      # ---------------- EXISTS ----------------
 
@@ -1020,7 +1232,7 @@ def convert_to_sql(question):
             window_start = max(0, i - 3)
             window = tokens[window_start:i] + tokens[i:i + 6]
             for w in window:
-                if w in COLUMN_MAP and COLUMN_MAP[w] not in CATEGORICAL_COLUMNS:
+                if w in COLUMN_MAP:
                     order_by_column = COLUMN_MAP[w]
                 if w in SORT_DIRECTION_MAP:
                     order_by_direction = SORT_DIRECTION_MAP[w]
@@ -1029,12 +1241,22 @@ def convert_to_sql(question):
     # ---------------- SELECTED COLUMNS ("show name and marks of students") ----------------
 
     STOP_WORDS_FOR_COLUMNS = {
-        "where", "whose", "with", "having",
+        "where", "whose", "having",
         "between",
         "above", "below", "over", "under", "greater", "less", "more",
         "order", "sort", "arrange",
         "limit",
         "like", "contains", "containing", "starting", "starts", "ending", "ends",
+        "on",  # Stop at JOIN conditions
+    }
+
+    # Map generic column names to table-specific column names when needed
+    TABLE_NAME_COLUMN = {
+        "departments": "department_name",
+        "courses": "course_name",
+        "teachers": "teacher_name",
+        # students and employees already have "name" column
+        # enrollments and attendance have no meaningful "name" column
     }
 
     selected_columns = []
@@ -1060,22 +1282,86 @@ def convert_to_sql(question):
         # select both name AND city, when only name was actually asked for.
         DESCRIPTOR_VALUE_LISTS = {"city": CITIES, "department": DEPARTMENTS, "gender": GENDERS}
 
+        # Reset for this query
+        selected.clear()
+        selected_columns.clear()
         for i, word in enumerate(tokens[intent_word_idx + 1:end_idx], start=intent_word_idx + 1):
             if i in join_related_indices:
                 continue
-            if word in COLUMN_MAP:
-                col = COLUMN_MAP[word]
+            # Check for dotted column names (e.g., students.name)
+            col_key = word
+            src_table_guess = None
+            if '.' in word:
+                parts = word.split('.')
+                if len(parts) == 2 and parts[1] in COLUMN_MAP:
+                    col_key = parts[1]
+                    src_table_guess = parts[0]  # could be table name or alias
+            if col_key in COLUMN_MAP:
+                col = COLUMN_MAP[col_key]
+                # Determine source table for this column
+                src_table = None
+                # If we have a src_table_guess from dotted notation, use it if it's a known table
+                if src_table_guess and src_table_guess in TABLE_MAP:
+                    src_table = TABLE_MAP[src_table_guess]
+                # Handle special case for "name"/"names" where preceding table name indicates the column's table
+                elif word in ("name", "names"):
+                    if i > 0 and tokens[i-1] in TABLE_MAP:
+                        prev_table_word = tokens[i-1]
+                        prev_table = TABLE_MAP[prev_table_word]
+                        if prev_table in TABLE_NAME_COLUMN:
+                            col = TABLE_NAME_COLUMN[prev_table]
+                            src_table = prev_table
+                        else:
+                            # No special mapping, column belongs to the preceding table
+                            src_table = prev_table
+                    else:
+                        # No preceding table word; use current table context
+                        src_table = table
+                        if table and table in TABLE_NAME_COLUMN:
+                            col = TABLE_NAME_COLUMN[table]
+                else:
+                    # For other columns, check if preceding token is a table name
+                    if i > 0 and tokens[i-1] in TABLE_MAP:
+                        src_table = TABLE_MAP[tokens[i-1]]
+                    else:
+                        src_table = table
+                # If we still don't have a source table, default to the main table
+                if src_table is None:
+                    src_table = table
+                # Skip if this column is merely describing a value (e.g., "bangalore CITY")
                 prev_word = tokens[i - 1] if i > 0 else None
                 value_list = DESCRIPTOR_VALUE_LISTS.get(col)
                 if value_list is not None and prev_word in value_list:
                     continue
-                if col not in selected_columns:
+                # Avoid duplicate (column, source_table) entries
+                if (col, src_table) not in selected:
+                    selected.append((col, src_table))
                     selected_columns.append(col)
+            # Debug print
+            print("DEBUG: selected:", selected)
+
+        # Build select_parts from selected (column, source_table) tuples
+        if selected:
+            select_parts = []
+            for col, src in selected:
+                # Apply column aliases if any
+                if col in column_aliases:
+                    alias = column_aliases[col]
+                    if second_table:
+                        select_parts.append(f"{src}.{col} AS {alias}")
+                    else:
+                        select_parts.append(f"{col} AS {alias}")
+                else:
+                    if second_table:
+                        select_parts.append(f"{src}.{col}")
+                    else:
+                        select_parts.append(col)
+            select_columns_sql = ", ".join(select_parts)
+        else:
+            select_columns_sql = "*"
 
     # ---------------- ALIASES (AS) ----------------
     # e.g. "show salary as pay" -> SELECT salary AS pay
-
-    column_aliases = {}
 
     for i, word in enumerate(tokens):
         if word == "as" and i > 0 and i + 1 < len(tokens):
@@ -1083,13 +1369,21 @@ def convert_to_sql(question):
             if prev_word in COLUMN_MAP:
                 column_aliases[COLUMN_MAP[prev_word]] = tokens[i + 1]
 
-    if selected_columns:
+    # Rebuild select_columns_sql with aliases applied
+    if selected:
         select_parts = []
-        for col in selected_columns:
+        for col, src in selected:
             if col in column_aliases:
-                select_parts.append(f"{col} AS {column_aliases[col]}")
+                alias = column_aliases[col]
+                if second_table:
+                    select_parts.append(f"{src}.{col} AS {alias}")
+                else:
+                    select_parts.append(f"{col} AS {alias}")
             else:
-                select_parts.append(col)
+                if second_table:
+                    select_parts.append(f"{src}.{col}")
+                else:
+                    select_parts.append(f"{src}.{col}")
         select_columns_sql = ", ".join(select_parts)
     else:
         select_columns_sql = "*"
@@ -1290,10 +1584,93 @@ def convert_to_sql(question):
 
     if second_table:
 
+        # Handle FULL OUTER JOIN simulation using UNION of LEFT and RIGHT joins
+        if join_type == "FULL OUTER":
+            # Determine which columns to join on
+            if join_columns:
+                cols_to_join = join_columns
+            elif table in TABLES_WITH_CITY and second_table in TABLES_WITH_CITY:
+                cols_to_join = [SHARED_COLUMN]
+            else:
+                # No common join column; use cross join (no ON clause)
+                cols_to_join = []
+
+            # Build SELECT clause - handle specific columns or wildcard
+            if select_columns_sql == "*":
+                select_cols = f"{table}.*, {second_table}.*"
+            else:
+                select_cols = select_columns_sql
+
+            # Build the ON clause for the join
+            if cols_to_join:
+                on_clause = " AND ".join(f"{table}.{c} = {second_table}.{c}" for c in cols_to_join)
+            else:
+                on_clause = ""  # For cross join style
+
+            # Build each part of the query
+            # LEFT JOIN part
+            left_join_part = f"FROM {table} LEFT JOIN {second_table}"
+            if on_clause:
+                left_join_part += f" ON {on_clause}"
+            if where_clause:
+                left_join_part += f" {where_clause}"
+
+            # RIGHT JOIN part
+            right_join_part = f"FROM {table} RIGHT JOIN {second_table}"
+            if on_clause:
+                right_join_part += f" ON {on_clause}"
+            if where_clause:
+                right_join_part += f" {where_clause}"
+
+            # Build GROUP BY, HAVING, ORDER BY, LIMIT clauses that apply to the final result
+            extra_clauses = f"{group_by_clause}{having_clause}{order_by_clause}{limit_clause}"
+
+            if cols_to_join:
+                # Standard case: we have specific columns to join on
+                return f"""
+        SELECT {select_cols}
+        {left_join_part}
+        UNION
+        SELECT {select_cols}
+        {right_join_part}
+        {extra_clauses}
+        """.strip()
+            else:
+                # No join columns - simulate FULL OUTER JOIN using UNION of CROSS JOINs
+                # This is equivalent to (table1 CROSS JOIN table2) UNION (table1 CROSS JOIN table2)
+                # which is just table1 CROSS JOIN table2, but we follow the pattern for consistency
+                cross_join_part = f"FROM {table} CROSS JOIN {second_table}"
+                if where_clause:
+                    cross_join_part += f" {where_clause}"
+
+                return f"""
+        SELECT {select_cols}
+        {cross_join_part}
+        {extra_clauses}
+        """.strip()
+
         if join_type == "CROSS JOIN":
             join_clause = f" CROSS JOIN {second_table}"   # no ON - true Cartesian product
         else:
-            cols_to_join = join_columns if join_columns else [SHARED_COLUMN]
+            # Determine which columns to join on
+            if join_columns:
+                cols_to_join = join_columns
+            elif table in TABLES_WITH_CITY and second_table in TABLES_WITH_CITY:
+                cols_to_join = [SHARED_COLUMN]
+            else:
+                # No common join column; use cross join (no ON clause)
+                join_clause = f" CROSS JOIN {second_table}"
+                # Skip the rest of the join processing for this case
+                join_select_cols = f"{table}.*, {second_table}.*" if select_columns_sql == "*" else select_columns_sql
+                return f"""
+        SELECT {join_select_cols}
+        FROM {table}
+        {join_clause}
+        {where_clause}
+        {group_by_clause}{having_clause}{order_by_clause}{limit_clause}
+        """.strip()
+
+            # If we have columns to join on, build the ON clause
             on_clause = " AND ".join(f"{table}.{c} = {second_table}.{c}" for c in cols_to_join)
             join_clause = f" {join_type} {second_table} ON {on_clause}"
 
@@ -1304,6 +1681,7 @@ def convert_to_sql(question):
         FROM {table}
         {join_clause}
         {where_clause}
+        {group_by_clause}{having_clause}{order_by_clause}{limit_clause}
         """.strip()
 
     # ---------------- UNION QUERY ----------------
