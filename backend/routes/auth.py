@@ -1,6 +1,3 @@
-# Save this as routes/auth.py in your project (kept flat here since I don't
-# have write access to your actual routes/ folder).
-
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import create_access_token
 from services.auth_service import create_user, verify_login

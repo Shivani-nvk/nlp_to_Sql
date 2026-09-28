@@ -1,12 +1,16 @@
 """The query.py file defines the /query API endpoint. It receives the users natural language query,
-converts it to SQL using NLP, executes it on MySQL, and returns the result."""
+converts it to SQL using NLP, executes it on MySQL, and returns the result.
+
+The hybrid router is used: the rule-based engine is always tried first, and
+the agentic AI engine only activates as a fallback (with a bounded
+self-healing loop)."""
 
 from flask import Blueprint, request, jsonify
-from flask_jwt_extended import verify_jwt_in_request
-from db import get_db_connection
-from services.nlp_to_sql import convert_to_sql
+from flask_jwt_extended import verify_jwt_in_request, get_jwt
+from services.hybrid_router import run_hybrid_query
 
 query_bp = Blueprint("query", __name__)
+
 
 @query_bp.route("/query", methods=["GET", "POST"])
 def run_query():
@@ -30,30 +34,31 @@ def run_query():
 
     question = data["question"]
 
-    # Convert natural language to SQL
-    sql = convert_to_sql(question)
+    if not isinstance(question, str):
+        return jsonify({"error": "Question must be a string."}), 400
 
-    # Safety net: /query is read-only for everyone (admin and user alike).
-    # Insert/update/delete will go through separate admin-only routes once
-    # those exist - this blocks it even if nlp_to_sql.py is later extended
-    # to generate non-SELECT statements.
-    if not sql.strip().upper().startswith("SELECT"):
-        return jsonify({"error": "Only SELECT queries are allowed here."}), 403
+    if not question.strip():
+        return jsonify({"error": "Question missing"}), 400
 
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    claims = get_jwt()
+    role = claims.get("role", "user")
 
-    try:
-        cursor.execute(sql)
-        result = cursor.fetchall()
-        conn.close()
+    # Run the hybrid pipeline (rule-based first, agentic as fallback).
+    result = run_hybrid_query(question, role=role)
 
-        return jsonify({
-            "question": question,
-            "sql": sql,
-            "data": result
-        })
+    response = {
+        "question": question,
+        "sql": result["sql"],
+        "data": result["result"],
+        "source": result["source"],
+        "trace": result["trace"],
+        "repair_attempts": result["repair_attempts"],
+        # Backwards-compat flag for the existing frontend logic.
+        "used_ai_fallback": result["source"] in ("agentic", "agentic_self_healed"),
+    }
 
-    except Exception as e:
-        conn.close()
-        return jsonify({"error": str(e)}), 500
+    if result["error"] and result["source"] == "failed":
+        response["error"] = result["error"]
+        return jsonify(response), 500
+
+    return jsonify(response)

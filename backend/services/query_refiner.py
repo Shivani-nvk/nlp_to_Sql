@@ -8,7 +8,7 @@ re-run the NLP parser. Instead it:
      order by / limit) using regex.
   2. Applies rule-based edits to that dict based on the user's free-text
      feedback, reusing the same vocabulary dictionaries as nlp_to_sql.py
-     (TABLE_MAP, COLUMN_MAP, CITIES, DEPARTMENTS, GENDERS, SORT_DIRECTION_MAP)
+     (TABLE_MAP, COLUMN_MAP, CITIES, DEPARTMENTS, SORT_DIRECTION_MAP)
      so "Bangalore", "HR", "descending", etc. are recognised consistently.
      It also reuses nlp_to_sql.py's words_to_numbers() and
      merge_comparison_phrases() helpers, so English number words ("two",
@@ -32,17 +32,32 @@ from services.nlp_to_sql import (
     COLUMN_MAP,
     CITIES,
     DEPARTMENTS,
-    GENDERS,
     SORT_DIRECTION_MAP,
     CATEGORICAL_COLUMNS,
+    # Shared with the main parser so both agree on what a column is called
+    # for a given table, and on which numeric column a table falls back to
+    # when the feedback names none.
+    DEFAULT_NUMERIC_COLUMN,
+    department_display,
+    city_display,
+    resolve_column,
+    table_columns,
+    build_department_id_condition,
+    CATEGORICAL_VALUE_COLUMN,
+    CATEGORICAL_VALUE_DISPLAY,
+    # "max marks", "subject name", "phone number" ... are stored as single
+    # canonical keys, so the phrase has to be collapsed before the tokens are
+    # scanned for columns - otherwise "only show subject name and max marks"
+    # reads "marks" as marks.Marks (wrong table), drops it, and never reaches
+    # Max_Marks at all.
+    merge_multiword_columns,
+    # Real values of the low-cardinality text columns, used to check a
+    # categorical word against what the column actually holds.
+    COLUMN_VALUES,
+    refresh_column_values,
     words_to_numbers,
     merge_comparison_phrases,
 )
-
-DEFAULT_NUMERIC_COLUMN = {
-    "students": "marks",
-    "employees": "salary",
-}
 
 
 class RefinementError(Exception):
@@ -56,6 +71,30 @@ class RefinementError(Exception):
 # ---------------- SQL -> structured dict ----------------
 
 UNSUPPORTED_KEYWORDS = ["JOIN", "UNION", " EXISTS", "CASE WHEN", "IFNULL(", "COALESCE("]
+
+# The main parser resolves a spoken department through the `department` table
+# ("... WHERE department_id = (SELECT department_id FROM department WHERE
+# department_name = 'IT')") rather than inventing a "department" column that
+# no table has. That nested SELECT would otherwise trip the "more than one
+# SELECT" refusal below and make every department query un-refinable, so it is
+# lifted out first and kept as one opaque, replaceable condition.
+#
+# All three forms nlp_to_sql.py can emit are matched: "department_id = (...)",
+# "department_id IN (...)" and the negated variants. The whole match is kept
+# verbatim, so putting it back can only ever reproduce valid SQL.
+DEPARTMENT_SUBQUERY_RE = re.compile(
+    r"department_id\s*(?:NOT\s+IN|IN|=)\s*\(\s*SELECT\s+department_id\s+FROM\s+"
+    r"department\s+WHERE\s+department_name\s*(?:NOT\s+IN|IN|=)\s*"
+    r"(?:\(\s*'[^']*'(?:\s*,\s*'[^']*')*\s*\)|'[^']*')\s*\)",
+    re.IGNORECASE,
+)
+
+# Placeholder written into the WHERE list in place of the lifted subquery. The
+# trailing digits index into ctx["subqueries"], and rebuild_sql swaps the real
+# SQL back in before the statement is returned. It is shaped like a condition
+# (rather than a bare word) so CONDITION_RE still splits it out of a compound
+# WHERE instead of swallowing it into the "couldn't decompose" fallback chunk.
+DEPARTMENT_SUBQUERY_TOKEN_RE = re.compile(r"__department_subquery_(\d+)__")
 
 SELECT_RE = re.compile(
     r'^SELECT\s+(?P<select>.+?)\s+FROM\s+(?P<table>[A-Za-z_]\w*)'
@@ -79,7 +118,10 @@ CONDITION_RE = re.compile(
     r"IS NOT NULL|IS NULL|"
     r"NOT LIKE\s+'[^']*'|LIKE\s+'[^']*'|"
     r"(?:>=|<=|!=|=|>|<)\s*(?:'[^']*'|\S+)"
-    r")",
+    r")"
+    # The lifted department subquery, which stands in for one whole condition
+    # (see DEPARTMENT_SUBQUERY_TOKEN_RE).
+    r"|__department_subquery_\d+__",
     re.IGNORECASE,
 )
 
@@ -92,6 +134,17 @@ def parse_query(sql):
     normalized = normalize_sql(sql)
     upper = normalized.upper()
 
+    subqueries = []
+
+    def _lift(match):
+        subqueries.append(" ".join(match.group(0).split()))
+        return f"__department_subquery_{len(subqueries) - 1}__"
+
+    if DEPARTMENT_SUBQUERY_RE.search(normalized):
+        normalized = DEPARTMENT_SUBQUERY_RE.sub(_lift, normalized)
+        upper = normalized.upper()
+
+    # the department lookup(s) above were the only tolerated second SELECT
     if upper.count("SELECT") > 1 or any(kw in upper for kw in UNSUPPORTED_KEYWORDS):
         raise RefinementError(
             "That query uses a JOIN/UNION/subquery, which is too complex to "
@@ -121,6 +174,7 @@ def parse_query(sql):
         "having": d["having"].strip() if d["having"] else None,
         "order_by": d["order_by"].strip() if d["order_by"] else None,
         "limit": d["limit"],
+        "subqueries": subqueries,
     }
 
 
@@ -139,6 +193,17 @@ def rebuild_sql(ctx):
     if ctx["limit"]:
         sql += f" LIMIT {ctx['limit']}"
 
+    # Put the lifted department subquery back. An unrecognised index is left
+    # as the bare placeholder rather than dropped, so a bug here surfaces as
+    # an obviously-invalid WHERE instead of a silently narrower query.
+    subqueries = ctx.get("subqueries") or []
+    if subqueries:
+        def _restore(match):
+            index = int(match.group(1))
+            return subqueries[index] if index < len(subqueries) else match.group(0)
+
+        sql = DEPARTMENT_SUBQUERY_TOKEN_RE.sub(_restore, sql)
+
     return sql
 
 
@@ -146,8 +211,13 @@ def rebuild_sql(ctx):
 
 ONLY_TRIGGERS = {"only", "just"}
 REMOVE_TRIGGERS = {"remove", "drop", "clear", "without", "exclude"}
-SORT_WORDS = {"sort", "order", "arrange", "ascending", "descending", "asc", "desc"}
-SWAP_TRIGGERS = {"instead", "meant", "not"}
+SORT_WORDS = {"sort", "sorted", "order", "ordered", "arrange", "ascending", "descending", "asc", "desc"}
+# "instead"/"meant"/"not" name a replacement table or column; "swap"/"rather"
+# can only ever mean a column ("swap department for address" - swapping the
+# table there would silently answer a question about a different table)
+TABLE_SWAP_TRIGGERS = {"instead", "meant", "not"}
+COLUMN_SWAP_TRIGGERS = TABLE_SWAP_TRIGGERS | {"swap", "rather"}
+SWAP_TRIGGERS = TABLE_SWAP_TRIGGERS
 LIMIT_WORDS = {"top", "limit", "first"}
 
 # Words that signal "more than N rows per group" - i.e. a HAVING COUNT(*)
@@ -166,11 +236,16 @@ HAVING_LTE_WORDS = {"less", "fewer", "below", "under"}
 HAVING_SCOPE_WORDS = {"students", "employees", "rows", "records", "entries", "count", "count(*)"}
 
 
-def _extract_columns(tokens):
+def _extract_columns(tokens, table=None):
     cols = []
     for w in tokens:
         if w in COLUMN_MAP and COLUMN_MAP[w] not in cols:
-            cols.append(COLUMN_MAP[w])
+            col = COLUMN_MAP[w]
+            if col == "name":
+                col = resolve_column("name", table) if table else col
+            if table and col not in table_columns(table):
+                continue
+            cols.append(col)
     return cols
 
 
@@ -189,6 +264,13 @@ def apply_feedback(ctx, feedback_text):
     # is collapsed).
     tokens = words_to_numbers(tokens)
     tokens = merge_comparison_phrases(tokens)
+    # ...and the same for multi-word column names, so "max marks" reaches
+    # Max_Marks instead of being read as the unrelated marks.Marks
+    tokens = merge_multiword_columns(tokens)
+    # the categorical rules below check a spoken value against what the column
+    # really holds, which needs the sampled values; the sampler is cached, and
+    # an unreachable database just leaves the map empty
+    refresh_column_values()
     applied = []
 
     # 1. Table swap - "employees instead of students", "I meant employees not students"
@@ -200,7 +282,7 @@ def apply_feedback(ctx, feedback_text):
             seen.append(t)
     tables_mentioned = seen
 
-    if len(tables_mentioned) >= 1 and any(w in tokens for w in SWAP_TRIGGERS):
+    if len(tables_mentioned) >= 1 and any(w in tokens for w in TABLE_SWAP_TRIGGERS):
         new_table = tables_mentioned[0]
         if new_table != ctx["table"]:
             ctx["table"] = new_table
@@ -212,12 +294,72 @@ def apply_feedback(ctx, feedback_text):
 
     # 2. Column restriction - "only want name and marks", "just show name, marks"
     if any(t in tokens for t in ONLY_TRIGGERS):
-        cols = _extract_columns(tokens)
+        cols = _extract_columns(tokens, table=ctx["table"])
         if cols:
             ctx["select"] = cols
             applied.append(f"limited columns to: {', '.join(cols)}")
 
-    # 3. Sort direction / column
+            # If the query is GROUP BY'd and the restriction narrows it to
+            # a single column that isn't the current grouping column,
+            # follow it - "SELECT department ... GROUP BY subject" is
+            # either invalid SQL or silently wrong, so the grouping is
+            # updated to stay consistent with what's being shown.
+            restricted = [c for c in cols if c != "COUNT(*)"]
+            if ctx["group_by"] and len(restricted) == 1 and ctx["group_by"] != restricted[0]:
+                ctx["group_by"] = restricted[0]
+
+    # 3. Column swap - "swap department for address", "show phone number
+    #    instead of address". Both columns have to be real columns of the
+    #    same table: this only rewrites the projection, never a WHERE
+    #    condition, so the filter the user already agreed to keeps working.
+    if any(t in tokens for t in COLUMN_SWAP_TRIGGERS):
+        _real_cols = table_columns(ctx["table"])
+        # every column the feedback named is collected, not just the ones this
+        # table happens to have: "swap department for address" names a
+        # department, and employee_info has no department column to replace -
+        # it has a Department_ID the user is thinking of as "the department
+        # bit". The replacement still has to be a real column.
+        named = []
+        for w in tokens:
+            if w in COLUMN_MAP:
+                col = COLUMN_MAP[w]
+                if col == "name":
+                    col = resolve_column("name", ctx["table"])
+                if col not in named:
+                    named.append(col)
+        _named_real = [c for c in named if c in _real_cols]
+        if len(named) >= 2 and _named_real:
+            old_col = named[0]
+            new_col = _named_real[-1]
+            if old_col.lower() == new_col.lower():
+                old_col, new_col = new_col, _named_real[0] if _named_real[0].lower() != new_col.lower() else old_col
+            if old_col.lower() != new_col.lower():
+                if ctx["select"] == ["*"]:
+                    # `SELECT *` has to be spelled out to drop one column
+                    ctx["select"] = [
+                        c for c in sorted(_real_cols) if c.lower() != old_col.lower()
+                    ]
+                replaced = False
+                for i, c in enumerate(ctx["select"]):
+                    if c.lower() == old_col.lower():
+                        ctx["select"][i] = new_col
+                        replaced = True
+                if not replaced:
+                    # the thing being replaced isn't a column of this table, so
+                    # the request is really "show me that instead"
+                    ctx["select"] = [new_col]
+                    applied.append(f"showed '{new_col}' instead of '{old_col}'")
+                else:
+                    # a GROUP BY / ORDER BY on the column that just left the
+                    # projection has to follow it, or the query stops being valid
+                    if ctx["group_by"] and ctx["group_by"].lower() == old_col.lower():
+                        ctx["group_by"] = new_col
+                    if ctx["order_by"] and ctx["order_by"].split()[0].lower() == old_col.lower():
+                        _parts = ctx["order_by"].split()
+                        ctx["order_by"] = " ".join([new_col] + _parts[1:])
+                    applied.append(f"swapped '{old_col}' for '{new_col}'")
+
+    # 4. Sort direction / column
     if any(t in tokens for t in SORT_WORDS):
         direction = None
         for w in tokens:
@@ -230,15 +372,50 @@ def apply_feedback(ctx, feedback_text):
             elif "lowest" in tokens or "smallest" in tokens:
                 direction = "ASC"
 
+        _real_cols = table_columns(ctx["table"])
         sort_col = None
+        # did the feedback name something we could not use? if so the
+        # fallbacks below must not quietly sort by a different column
+        named_unusable = False
+        named_categorical = None
         for w in tokens:
-            if w in COLUMN_MAP and COLUMN_MAP[w] not in CATEGORICAL_COLUMNS:
-                sort_col = COLUMN_MAP[w]
-                break
+            if w not in COLUMN_MAP:
+                continue
+            candidate = COLUMN_MAP[w]
+            if candidate == "name":
+                candidate = resolve_column("name", ctx["table"])
+            # ORDER BY has to name a column the table actually has
+            if candidate not in _real_cols:
+                named_unusable = True
+                continue
+            # the abstract "name" is preferred over anything else; a real
+            # categorical column (address, exam, result) is still a perfectly
+            # good sort key, it is just not what the user named first
+            if candidate in CATEGORICAL_COLUMNS and candidate != "name":
+                if named_categorical is None:
+                    named_categorical = candidate
+                continue
+            sort_col = candidate
+            break
+        # "sort by department name" on a table that only stores Department_ID
+        # needs a JOIN to department, which this refiner cannot build. So does
+        # "sort by marks" on student_info. Falling back to some other column
+        # (a name, the first selected column, the table's default numeric) in
+        # that situation answers a different question than the one that was
+        # asked, so the request goes to the agentic refiner instead.
+        if named_unusable and sort_col is None:
+            raise RefinementError(
+                "I can't sort this query by that - it would need a join to "
+                "another table. Try asking for it as a new question."
+            )
+        if sort_col is None and named_categorical:
+            sort_col = named_categorical
         if sort_col is None and ctx["order_by"]:
-            sort_col = ctx["order_by"].split()[0]
+            existing = ctx["order_by"].split()[0]
+            sort_col = existing if existing in _real_cols else None
         if sort_col is None and ctx["select"] and ctx["select"] != ["*"]:
-            sort_col = ctx["select"][0]
+            first = ctx["select"][0]
+            sort_col = first if first in _real_cols else None
         if sort_col is None:
             sort_col = DEFAULT_NUMERIC_COLUMN.get(ctx["table"])
 
@@ -247,18 +424,36 @@ def apply_feedback(ctx, feedback_text):
             ctx["order_by"] = f"{sort_col} {direction}"
             applied.append(f"sorting by {sort_col} {direction}")
 
-    # 4. Remove filters (specific column, or all)
+    # 5. Remove filters (specific column, or all)
     if any(t in tokens for t in REMOVE_TRIGGERS) or "no filter" in text or "no condition" in text:
         removed_col = None
         for w in tokens:
             if w in COLUMN_MAP:
-                removed_col = COLUMN_MAP[w]
+                candidate = COLUMN_MAP[w]
+                if candidate == "name":
+                    candidate = resolve_column("name", ctx["table"])
+                removed_col = candidate
                 break
         if removed_col:
             before = len(ctx["where"])
             ctx["where"] = [c for c in ctx["where"] if not c.lower().startswith(removed_col.lower() + " ")]
             if len(ctx["where"]) < before:
                 applied.append(f"removed filter on '{removed_col}'")
+            elif removed_col in ctx["select"]:
+                ctx["select"] = [c for c in ctx["select"] if c.lower() != removed_col.lower()]
+                applied.append(f"removed column '{removed_col}'")
+            elif ctx["select"] == ["*"]:
+                # "remove budget" after a `SELECT *` means "show me everything
+                # except budget" - there is no WHERE to strip, so the only
+                # honest reading is to name the remaining columns
+                _real = sorted(table_columns(ctx["table"]))
+                remaining = [c for c in _real if c.lower() != removed_col.lower()]
+                if remaining:
+                    ctx["select"] = remaining
+                    applied.append(
+                        f"hidden '{removed_col}', showing the other "
+                        f"{len(remaining)} columns"
+                    )
         elif ctx["where"]:
             ctx["where"] = []
             applied.append("cleared all filters")
@@ -294,35 +489,132 @@ def apply_feedback(ctx, feedback_text):
                 ctx["select"].append("COUNT(*)")
             applied.append(f"added group filter: COUNT(*) {op} {num}")
 
-    # 5. Categorical filters - city / department / gender
-    #    "it" is deliberately excluded unless "department"/"dept" is also
-    #    present - otherwise ordinary pronouns ("make it better", "fix it")
-    #    would be misread as the IT department, the same collision
-    #    nlp_to_sql.py itself guards against.
+    # 5. Categorical filters - department / city(address) / exam / result
+    #    "it" is a real department name here, but it is also the most common
+    #    pronoun in English ("make it better"). The disambiguator is the table
+    #    being refined: employee_info and project carry Department_ID, so on
+    #    those "show me it" can only sensibly mean the IT department, while on
+    #    a table with no department column there is nothing for it to mean.
+    _real_cols = table_columns(ctx["table"])
+    _has_dept = "department_name" in _real_cols or "department_id" in _real_cols
     mentions_department_word = "department" in tokens or "dept" in tokens
 
-    for value_list, colname, caser in [
-        (CITIES, "city", str.title),
-        (DEPARTMENTS, "department", str.upper),
-        (GENDERS, "gender", str.capitalize),
-    ]:
-        found = [
-            w for w in tokens
-            if w in value_list and not (colname == "department" and w == "it" and not mentions_department_word)
-        ]
-        if found:
-            val = caser(found[0])
-            new_cond = f"{colname} = '{val}'"
-            ctx["where"] = [c for c in ctx["where"] if not c.lower().startswith(colname.lower() + " ")]
-            ctx["where"].append(new_cond)
-            applied.append(f"filtered {colname} = '{val}'")
+    def _drop_filter(predicate):
+        kept = []
+        for c in ctx["where"]:
+            if predicate(c):
+                continue
+            kept.append(c)
+        ctx["where"] = kept
+
+    def _is_department_condition(condition):
+        # "department_id = ..." plus the lifted-subquery placeholder, which
+        # stands in for exactly that condition.
+        return (
+            condition.lower().startswith("department")
+            or DEPARTMENT_SUBQUERY_TOKEN_RE.fullmatch(condition.strip()) is not None
+        )
+
+    # department - a name on the department table, an id lookup on the tables
+    # that only store one
+    found_departments = [
+        w for w in tokens
+        if w in DEPARTMENTS
+        and not (w == "it" and not (mentions_department_word or _has_dept))
+    ]
+    if found_departments and (
+        "department_name" in _real_cols or "department_id" in _real_cols
+    ):
+        _drop_filter(_is_department_condition)
+        _values = [(department_display(w), False) for w in found_departments]
+        if "department_name" in _real_cols:
+            ctx["where"].append(
+                "department_name = " + " OR ".join(f"'{v}'" for v, _ in _values)
+            )
+        else:
+            ctx["where"].append(build_department_id_condition(_values, len(_values) > 1))
+        applied.append(f"filtered department to {', '.join(v for v, _ in _values)}")
+
+    # "city" is just another word for Address in this schema
+    found_cities = [w for w in tokens if w in CITIES]
+    if found_cities and "address" in _real_cols:
+        _drop_filter(lambda c: c.lower().startswith("address"))
+        _values = [city_display(w) for w in found_cities]
+        if len(_values) == 1:
+            ctx["where"].append(f"address = '{_values[0]}'")
+        else:
+            joined = ", ".join(f"'{v}'" for v in _values)
+            ctx["where"].append(f"address IN ({joined})")
+        applied.append(f"filtered address to {', '.join(_values)}")
+
+    # exam / result fixed vocabularies (marks.Exam, marks.Result,
+    # performance.Result) - same words the main parser recognises.
+    # CATEGORICAL_VALUE_COLUMN maps the spoken VALUE to the column it lives
+    # in ("pass" -> "result"), so the words are grouped by the column they
+    # resolve to, not iterated as if the key were a column name.
+    _value_hits = {}
+    for w in tokens:
+        col = CATEGORICAL_VALUE_COLUMN.get(w)
+        if col and col in _real_cols:
+            _value_hits.setdefault(col, []).append(w)
+
+    for col, words in _value_hits.items():
+        # Pass/Fail belong to marks.Result while Good/Excellent/Average belong
+        # to performance.Result. Both columns are called "result", so the
+        # value is checked against what THIS table's column actually holds -
+        # otherwise "only show pass" on performance builds a filter that can
+        # never match and quietly returns nothing.
+        stored = COLUMN_VALUES.get(ctx["table"], {}).get(col)
+        if stored is not None:
+            _lower_stored = {s.lower(): s for s in stored}
+            _usable = []
+            for w in words:
+                _display = CATEGORICAL_VALUE_DISPLAY.get(w, w)
+                if _display.lower() in _lower_stored or w.lower() in _lower_stored:
+                    _usable.append(w)
+            if not _usable:
+                continue
+            words = _usable
+        _drop_filter(lambda c, _c=col: c.lower().startswith(_c + " "))
+        _seen = []
+        for w in words:
+            _v = CATEGORICAL_VALUE_DISPLAY.get(w, w)
+            if _v not in _seen:
+                _seen.append(_v)
+        if len(_seen) == 1:
+            ctx["where"].append(f"{col} = '{_seen[0]}'")
+        else:
+            joined = ", ".join(f"'{v}'" for v in _seen)
+            ctx["where"].append(f"{col} IN ({joined})")
+        applied.append(f"filtered {col} to {', '.join(_seen)}")
 
     # 6. Limit / top N
+    # "2" in "more than 2 students" is a HAVING threshold, not a row limit -
+    # so the "<digit> <table>" heuristic is skipped whenever the feedback is
+    # clearly a group-size filter (a HAVING-shaped request). Explicit
+    # top/limit/first words still apply in that case.
+    having_shaped_feedback = bool(
+        ctx["group_by"]
+        and any(w in tokens for w in HAVING_SCOPE_WORDS)
+        and (any(w in tokens for w in (HAVING_GTE_WORDS | HAVING_LTE_WORDS))
+             or "AT_LEAST" in tokens or "AT_MOST" in tokens)
+    )
+
     limit_val = None
-    for w in tokens:
+    limit_by_table_word = False
+    for i, w in enumerate(tokens):
         if w.isdigit():
             limit_val = w
-    if limit_val and any(t in tokens for t in LIMIT_WORDS):
+            # "show 3 employees" - a bare number right before a table name
+            # is a row-count limit, on top of the explicit top/limit/first
+            # words already handled below
+            if i + 1 < len(tokens) and tokens[i + 1] in TABLE_MAP:
+                limit_by_table_word = True
+                break
+    if limit_val and (
+        any(t in tokens for t in LIMIT_WORDS)
+        or (limit_by_table_word and not having_shaped_feedback)
+    ):
         ctx["limit"] = limit_val
         applied.append(f"limit set to {limit_val}")
 
@@ -330,8 +622,8 @@ def apply_feedback(ctx, feedback_text):
         raise RefinementError(
             "Couldn't confidently tell what to change from that feedback. "
             "Try something specific, e.g. 'only show name and marks', "
-            "'sort by salary descending', 'show only employees from "
-            "Bangalore', 'subjects with more than 2 students', or "
+            "'sort by budget descending', 'show only employees from "
+            "Bengaluru', 'subjects with more than 2 rows', or "
             "'remove the department filter'."
         )
 

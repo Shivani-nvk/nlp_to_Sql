@@ -6,7 +6,7 @@
 <title>NLP to SQL Converter</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -19,8 +19,39 @@
       <span>nlq<span class="wordmark-arrow">&rarr;</span>sql</span>
     </div>
     <div class="header-right">
+      <button type="button" class="header-icon-btn" id="schemaToggleBtn" title="Database Schema Explorer" onclick="toggleDrawer('schemaDrawer')" style="display:none;">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M4 6h16M4 12h16M4 18h16"></path>
+          <rect x="2" y="3" width="20" height="18" rx="2"></rect>
+        </svg>
+        <span>Schema</span>
+      </button>
+      <button type="button" class="header-icon-btn" id="historyToggleBtn" title="Query History" onclick="toggleDrawer('historyDrawer')" style="display:none;">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"></circle>
+          <polyline points="12 6 12 12 16 14"></polyline>
+        </svg>
+        <span>History</span>
+      </button>
+      <button type="button" class="theme-toggle-btn" id="themeToggleBtn" title="Toggle dark / light mode" onclick="toggleTheme()" aria-label="Toggle theme">
+        <svg class="sun-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="5"></circle>
+          <line x1="12" y1="1" x2="12" y2="3"></line>
+          <line x1="12" y1="21" x2="12" y2="23"></line>
+          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+          <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+          <line x1="1" y1="12" x2="3" y2="12"></line>
+          <line x1="21" y1="12" x2="23" y2="12"></line>
+          <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+          <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+        </svg>
+        <svg class="moon-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+        </svg>
+      </button>
       <span class="header-tag">Local dev tool</span>
       <div class="user-badge" id="userBadge" style="display:none;">
+        <span class="user-badge-indicator"></span>
         <span id="userBadgeText"></span>
         <button type="button" class="btn btn-ghost btn-small" onclick="logout()">Log out</button>
       </div>
@@ -87,38 +118,68 @@
     <section class="console" aria-label="Query console">
 
       <div class="console-bar">
-        <span class="dot dot-red"></span>
-        <span class="dot dot-amber"></span>
-        <span class="dot dot-green"></span>
-        <span class="console-bar-label">query.session</span>
+        <div class="console-bar-left">
+          <span class="dot dot-red"></span>
+          <span class="dot dot-amber"></span>
+          <span class="dot dot-green"></span>
+          <span class="console-bar-label">query.session</span>
+        </div>
+        <div class="shortcut-hint">
+          <span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> to run</span>
+        </div>
       </div>
 
       <div class="console-body">
         <div class="prompt-row">
           <span class="prompt-caret">&gt;</span>
-          <textarea id="userInput" placeholder="e.g. show top 5 students with highest marks" rows="2"></textarea>
-          <button type="button" class="mic-btn" id="micBtn" onclick="toggleMic()" title="Speak your question">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
-              <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
-              <line x1="12" y1="19" x2="12" y2="23"></line>
-              <line x1="8" y1="23" x2="16" y2="23"></line>
-            </svg>
-          </button>
+          <textarea id="userInput" placeholder="e.g. show students with marks above 80" rows="2"></textarea>
+          <div class="prompt-actions">
+            <button type="button" class="icon-action-btn" id="clearInputBtn" onclick="clearInput()" title="Clear prompt (Esc)" style="display:none;">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="18" y1="6" x2="6" y2="18"></line>
+                <line x1="6" y1="6" x2="18" y2="18"></line>
+              </svg>
+            </button>
+            <button type="button" class="mic-btn" id="micBtn" onclick="toggleMic()" title="Speak your question">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                <line x1="12" y1="19" x2="12" y2="23"></line>
+                <line x1="8" y1="23" x2="16" y2="23"></line>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="query-progress-bar" id="queryProgressBar" style="display:none;">
+          <div class="progress-indicator"></div>
         </div>
 
         <div class="console-actions">
           <button id="runBtn" class="btn btn-primary" onclick="showSQL()">
             <span class="btn-label">Run query</span>
+            <svg class="btn-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <polygon points="5 3 19 12 5 21 5 3"></polygon>
+            </svg>
+          </button>
+          <button type="button" id="doneBtn" class="btn btn-secondary" onclick="finishAndClearQuery()" title="Finish and clear query prompt for new search">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <polyline points="20 6 9 17 4 12"></polyline>
+            </svg>
+            <span>Done / Clear</span>
           </button>
           <span id="statusText" class="status-text"></span>
         </div>
 
-        <div class="chips" id="chips">
-          <button type="button" class="chip" data-q="count students by subject">count students by subject</button>
-          <button type="button" class="chip" data-q="show students with marks between 60 and 80">marks between 60 and 80</button>
-          <button type="button" class="chip" data-q="show students not from bangalore">not from bangalore</button>
-          <button type="button" class="chip" data-q="show top 5 students with highest marks">top 5 highest marks</button>
+        <div class="chips-container">
+          <span class="chips-label">Sample queries:</span>
+          <div class="chips" id="chips">
+            <button type="button" class="chip" data-q="show all courses">show all courses</button>
+            <button type="button" class="chip" data-q="show marks above 60">marks above 60</button>
+            <button type="button" class="chip" data-q="show students with marks above 80">students with marks above 80</button>
+            <button type="button" class="chip" data-q="average marks per subject">average marks per subject</button>
+            <button type="button" class="chip" data-q="show project names along with their lead employees">projects and their leads</button>
+          </div>
         </div>
       </div>
 
@@ -126,21 +187,78 @@
 
     <section class="sql-box" id="sqlSection">
       <div class="panel-head">
-        <h3>Generated SQL</h3>
-        <button type="button" class="btn btn-ghost btn-small" id="copyBtn" onclick="copySQL()">Copy</button>
+        <div class="panel-head-left">
+          <h3>Generated SQL</h3>
+          <span id="executionTimeBadge" class="time-badge" style="display:none;"></span>
+        </div>
+        <div class="panel-head-right">
+          <span id="sqlSourceBadge" class="source-badge" style="display:none;"></span>
+          <button type="button" class="btn btn-ghost btn-small" id="formatBtn" onclick="formatCurrentSQL()" title="Format SQL layout">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="21" y1="10" x2="3" y2="10"></line><line x1="21" y1="6" x2="3" y2="6"></line><line x1="21" y1="14" x2="3" y2="14"></line><line x1="21" y1="18" x2="3" y2="18"></line></svg>
+            Format
+          </button>
+          <button type="button" class="btn btn-ghost btn-small" id="explainBtn" onclick="toggleExplainSQL()" title="Explain this query">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+            Explain
+          </button>
+          <button type="button" class="btn btn-ghost btn-small" id="copyBtn" onclick="copySQL()">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            Copy
+          </button>
+        </div>
       </div>
-      <pre class="query"></pre>
 
-      <button class="btn btn-secondary" onclick="showOutput()">Show output</button>
+      <div class="sql-code-container">
+        <pre class="query" id="queryOutput"></pre>
+      </div>
+
+      <div id="queryExplanationBox" class="query-explanation-box" style="display:none;">
+        <div class="explanation-title">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+          <span>Query Analysis</span>
+        </div>
+        <div class="explanation-content" id="queryExplanationContent"></div>
+      </div>
+
+      <div class="sql-footer-bar">
+        <button class="btn btn-secondary" onclick="showOutput()">Show output</button>
+        <label class="auto-output-toggle">
+          <input type="checkbox" id="autoShowOutputToggle" checked>
+          <span>Auto-display results</span>
+        </label>
+      </div>
     </section>
 
     <section class="output-box" id="outputSection">
-      <div class="panel-head">
-        <h3>Query result</h3>
-        <span class="row-count" id="rowCount"></span>
+      <div class="panel-head output-panel-head">
+        <div class="panel-head-left">
+          <h3>Query result</h3>
+          <span class="row-count" id="rowCount"></span>
+        </div>
+        <div class="table-tools">
+          <div class="table-search-wrap">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <input type="text" id="tableSearchInput" placeholder="Filter rows..." oninput="filterResultsTable(this.value)">
+          </div>
+          <button type="button" class="btn btn-ghost btn-small" onclick="exportToCSV()" title="Export results as CSV file">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+            CSV
+          </button>
+          <button type="button" class="btn btn-ghost btn-small" onclick="exportToJSON()" title="Export results as JSON file">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+            JSON
+          </button>
+          <button type="button" class="btn btn-ghost btn-small" id="copyTableBtn" onclick="copyTableData()" title="Copy table to clipboard">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            Copy
+          </button>
+        </div>
       </div>
       <div class="table-wrap">
-        <table></table>
+        <table id="resultsTable"></table>
+      </div>
+      <div id="noResultsFiltered" class="empty-table-state" style="display:none;">
+        <p>No rows match your filter keyword.</p>
       </div>
     </section>
 
@@ -149,7 +267,10 @@
          with follow-up feedback instead of re-typing the whole question. -->
     <section class="chat-box" id="chatSection" style="display:none;">
       <div class="panel-head">
-        <h3>Refine this result</h3>
+        <div class="panel-head-left">
+          <h3>Refine this result</h3>
+          <span class="agent-pill">Iterative Agent</span>
+        </div>
       </div>
 
       <div class="chat-log" id="chatLog"></div>
@@ -157,15 +278,27 @@
       <div class="chat-satisfaction" id="chatSatisfaction">
         <p class="chat-prompt">Does this query and output satisfy you?</p>
         <div class="chat-satisfaction-buttons">
-          <button type="button" class="btn btn-primary btn-small" onclick="handleSatisfaction(true)">Yes</button>
-          <button type="button" class="btn btn-ghost btn-small" onclick="handleSatisfaction(false)">No</button>
+          <button type="button" class="btn btn-primary btn-small" onclick="handleSatisfaction(true)">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            Yes, looks good (Done)
+          </button>
+          <button type="button" class="btn btn-ghost btn-small" onclick="handleSatisfaction(false)">No, refine it</button>
         </div>
       </div>
 
       <div class="chat-feedback-input" id="chatFeedbackInput" style="display:none;">
-        <textarea id="chatFeedbackText" rows="2" placeholder="e.g. only show name and marks / sort by salary descending / show only employees from Bangalore"></textarea>
+        <div class="quick-refine-pills">
+          <span class="quick-refine-hint">Suggestions:</span>
+          <div class="quick-pills-wrap" id="quickPillsWrap">
+            <button type="button" class="quick-pill" onclick="applyQuickRefine('sort by marks descending')">sort descending</button>
+            <button type="button" class="quick-pill" onclick="applyQuickRefine('limit to 5')">limit 5</button>
+            <button type="button" class="quick-pill" onclick="applyQuickRefine('only show name and marks')">show key columns</button>
+            <button type="button" class="quick-pill" onclick="applyQuickRefine('group by subject')">group by subject</button>
+          </div>
+        </div>
+        <textarea id="chatFeedbackText" rows="2" placeholder="e.g. only show name and marks / sort by budget descending / show only employees from Bangalore"></textarea>
         <div class="console-actions">
-          <button type="button" class="btn btn-primary btn-small" onclick="submitChatFeedback()">Send</button>
+          <button type="button" class="btn btn-primary btn-small" id="chatSubmitBtn" onclick="submitChatFeedback()">Send</button>
           <span id="chatStatusText" class="status-text"></span>
         </div>
       </div>
@@ -182,9 +315,11 @@
         <button type="button" class="admin-tab" data-tab="update">Update</button>
         <button type="button" class="admin-tab" data-tab="delete">Delete</button>
         <button type="button" class="admin-tab" data-tab="column">Add Column</button>
+        <button type="button" class="admin-tab" data-tab="table">Add Table</button>
+        <button type="button" class="admin-tab" data-tab="droptable">Delete Table</button>
       </div>
 
-      <div class="field-row">
+      <div class="field-row" id="adminTableSelectRow">
         <label class="field-label" for="adminTableSelect">Table</label>
         <select id="adminTableSelect" class="field-input"></select>
       </div>
@@ -202,29 +337,34 @@
 
       <!-- UPDATE panel -->
       <div class="admin-panel" id="adminPanelUpdate" style="display:none;">
+        <p class="field-note">Enter a Row ID or any column value below to auto-fill the record before editing.</p>
         <div class="field-row">
           <label class="field-label" for="updateId">Row ID</label>
-          <input type="number" id="updateId" class="field-input">
+          <input type="text" id="updateId" class="field-input" placeholder="e.g. 1">
         </div>
         <div id="updateFields"></div>
         <div class="console-actions">
           <button class="btn btn-primary" onclick="submitUpdate()">
             <span class="btn-label">Update row</span>
           </button>
+          <button type="button" class="btn btn-ghost" onclick="clearUpdateForm()">Clear form</button>
           <span id="updateStatus" class="status-text"></span>
         </div>
       </div>
 
       <!-- DELETE panel -->
       <div class="admin-panel" id="adminPanelDelete" style="display:none;">
+        <p class="field-note">Enter a Row ID or any column value below to auto-fill matching records and delete.</p>
         <div class="field-row">
           <label class="field-label" for="deleteId">Row ID</label>
-          <input type="number" id="deleteId" class="field-input">
+          <input type="text" id="deleteId" class="field-input" placeholder="e.g. 1">
         </div>
+        <div id="deleteFields"></div>
         <div class="console-actions">
-          <button class="btn btn-secondary" onclick="submitDelete()">
+          <button class="btn btn-secondary btn-danger" onclick="submitDelete()">
             <span class="btn-label">Delete row</span>
           </button>
+          <button type="button" class="btn btn-ghost" onclick="clearDeleteForm()">Clear form</button>
           <span id="deleteStatus" class="status-text"></span>
         </div>
       </div>
@@ -261,15 +401,110 @@
         </div>
       </div>
 
+      <!-- ADD TABLE panel -->
+      <div class="admin-panel" id="adminPanelTable" style="display:none;">
+        <div class="field-row">
+          <label class="field-label" for="newTableName">Table name</label>
+          <input type="text" id="newTableName" class="field-input" placeholder="e.g. products">
+        </div>
+
+        <p class="field-note">Every table gets an auto-incrementing <code>id</code> column automatically. Add any other columns below (optional - you can also add them later from the "Add Column" tab).</p>
+
+        <div id="newTableColumns"></div>
+
+        <button type="button" class="btn btn-ghost btn-small" onclick="addTableColumnRow()">+ Add column</button>
+
+        <div class="console-actions">
+          <button class="btn btn-primary" onclick="submitCreateTable()">
+            <span class="btn-label">Create table</span>
+          </button>
+          <span id="tableStatus" class="status-text"></span>
+        </div>
+      </div>
+
+      <!-- DELETE TABLE panel -->
+      <div class="admin-panel" id="adminPanelDropTable" style="display:none;">
+        <p class="field-note field-note-warning">
+          This permanently deletes <strong id="dropTableTargetName">this table</strong> and every row in it. This can't be undone.
+        </p>
+
+        <div class="field-row">
+          <label class="field-label" for="dropTableConfirmInput">Type the table name to confirm</label>
+          <input type="text" id="dropTableConfirmInput" class="field-input" placeholder="table name" autocomplete="off">
+        </div>
+
+        <div class="console-actions">
+          <button class="btn btn-secondary btn-danger" onclick="submitDropTable()">
+            <span class="btn-label">Delete table</span>
+          </button>
+          <span id="dropTableStatus" class="status-text"></span>
+        </div>
+      </div>
+
     </section>
 
   </main>
 
   <footer class="site-footer">
-    <span>Rule-based NLP &rarr; SQL converter &middot; runs against a local MySQL instance</span>
+    <div class="footer-content">
+      <span>Rule-based NLP &rarr; SQL converter &middot; local MySQL engine</span>
+      <div class="footer-shortcuts">
+        <span><kbd>Ctrl</kbd>+<kbd>Enter</kbd> Run</span>
+        <span><kbd>Esc</kbd> Close panels</span>
+      </div>
+    </div>
   </footer>
 
 </div>
+
+<!-- ---------------- SCHEMA EXPLORER DRAWER ---------------- -->
+<aside class="drawer" id="schemaDrawer" aria-label="Database Schema">
+  <div class="drawer-header">
+    <div class="drawer-title-group">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M4 6h16M4 12h16M4 18h16"></path>
+        <rect x="2" y="3" width="20" height="18" rx="2"></rect>
+      </svg>
+      <h3>Database Schema</h3>
+    </div>
+    <button type="button" class="drawer-close-btn" onclick="closeDrawer('schemaDrawer')" title="Close">&times;</button>
+  </div>
+  <div class="drawer-body">
+    <div class="drawer-search-wrap">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+      <input type="text" id="schemaSearchInput" placeholder="Search tables or columns..." oninput="filterSchemaTree(this.value)">
+    </div>
+    <p class="drawer-tip">Click any table or column name below to insert it into your prompt.</p>
+    <div class="schema-tree" id="schemaTree">
+      <div class="schema-loading">Loading schema...</div>
+    </div>
+  </div>
+</aside>
+
+<!-- ---------------- QUERY HISTORY DRAWER ---------------- -->
+<aside class="drawer" id="historyDrawer" aria-label="Query History">
+  <div class="drawer-header">
+    <div class="drawer-title-group">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"></circle>
+        <polyline points="12 6 12 12 16 14"></polyline>
+      </svg>
+      <h3>Query History</h3>
+    </div>
+    <div class="drawer-header-actions">
+      <button type="button" class="btn btn-ghost btn-small" onclick="clearQueryHistory()">Clear</button>
+      <button type="button" class="drawer-close-btn" onclick="closeDrawer('historyDrawer')" title="Close">&times;</button>
+    </div>
+  </div>
+  <div class="drawer-body">
+    <div class="history-list" id="historyList">
+      <div class="empty-history-text">No queries executed yet.</div>
+    </div>
+  </div>
+</aside>
+
+<div class="drawer-backdrop" id="drawerBackdrop" onclick="closeAllDrawers()"></div>
+<div class="toast" id="toastNotification"></div>
 
 <script src="script.js"></script>
 </body>
