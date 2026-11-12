@@ -35,7 +35,8 @@ GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 GROQ_MODEL = "openai/gpt-oss-120b"
 
 
-def llm_fallback_convert(question, schema, previous_sql=None, error=None):
+def llm_fallback_convert(question, schema, previous_sql=None, error=None,
+                         dialect="mysql", column_values=None):
     """
     Called only when the rule-based nlp_to_sql.py couldn't recognise
     anything meaningful in the question (or as a self-healing repair when
@@ -44,16 +45,19 @@ def llm_fallback_convert(question, schema, previous_sql=None, error=None):
 
     When previous_sql + error are supplied, the prompt asks the model to
     correct the faulty SQL rather than generate from scratch.
+
+    dialect / column_values are used by the plugin path so prompts target
+    PostgreSQL/SQLite/etc. and sample the tenant's data, not the local demo DB.
     """
     try:
         if AI_PROVIDER == "groq":
-            return _convert_with_groq(question, schema, previous_sql, error)
+            return _convert_with_groq(question, schema, previous_sql, error, dialect, column_values)
         elif AI_PROVIDER == "grok":
-            return _convert_with_grok(question, schema, previous_sql, error)
+            return _convert_with_grok(question, schema, previous_sql, error, dialect, column_values)
         elif AI_PROVIDER == "gemini":
-            return _convert_with_gemini(question, schema, previous_sql, error)
+            return _convert_with_gemini(question, schema, previous_sql, error, dialect, column_values)
         elif AI_PROVIDER == "ollama":
-            return _convert_with_ollama(question, schema, previous_sql, error)
+            return _convert_with_ollama(question, schema, previous_sql, error, dialect, column_values)
         # Placeholder for later - uncomment and implement when ready:
         # elif AI_PROVIDER == "openai":
         #     return _convert_with_openai(question, schema)
@@ -65,19 +69,34 @@ def llm_fallback_convert(question, schema, previous_sql=None, error=None):
         return None
 
 
-def _build_prompt(question, schema, previous_sql=None, error=None):
+def _dialect_label(dialect):
+    name = (dialect or "mysql").lower()
+    if name in ("postgresql", "postgres"):
+        return "PostgreSQL"
+    if name == "sqlite":
+        return "SQLite"
+    if name in ("mssql", "microsoft"):
+        return "T-SQL (Microsoft SQL Server)"
+    return "MySQL"
+
+
+def _build_prompt(question, schema, previous_sql=None, error=None,
+                  dialect="mysql", column_values=None):
     schema_text = "\n".join(
         f"{table}: {', '.join(columns.keys())}"
         for table, columns in schema.items()
         if table != "app_users"   # never expose the auth table to the AI
     )
+    dialect_name = _dialect_label(dialect)
+    values_block = _values_section(column_values)
 
     if previous_sql and error:
         return f"""Fix the SQL query below so it runs correctly against this database.
 
+Database dialect: {dialect_name}
 Database schema:
 {schema_text}
-{_values_section()}
+{values_block}
 Original question: {question}
 
 Previous SQL (failed):
@@ -89,20 +108,23 @@ Problem:
 Rules:
 - Output ONLY the corrected raw SQL query - no explanation, no markdown, no backticks.
 - The query MUST start with SELECT.
+- Use {dialect_name} syntax (identifier quoting and functions).
 - Never write INSERT, UPDATE, DELETE, DROP, ALTER, or any non-SELECT statement.
 - Only use tables and columns listed above - never invent column or table names.
 - Fix whatever caused it while keeping the question's intent.
 {_VALUE_GROUNDING_RULES}
 Corrected SQL:"""
 
-    return f"""Convert this English question into a single MySQL SELECT query.
+    return f"""Convert this English question into a single {dialect_name} SELECT query.
 
+Database dialect: {dialect_name}
 Database schema:
 {schema_text}
-{_values_section()}
+{values_block}
 Rules:
 - Output ONLY the raw SQL query - no explanation, no markdown, no backticks.
 - The query MUST start with SELECT.
+- Use {dialect_name} syntax (identifier quoting and functions).
 - Never write INSERT, UPDATE, DELETE, DROP, ALTER, or any non-SELECT statement.
 - Only use tables and columns listed above - never invent column or table names.
 {_VALUE_GROUNDING_RULES}
@@ -147,7 +169,7 @@ def _clean_sql(text):
 _MAX_VALUES_SHOWN_PER_COLUMN = 25
 
 
-def _build_values_hint():
+def _build_values_hint(column_values=None):
     """
     Renders the real contents of low-cardinality text columns as a prompt
     section, or "" when the values could not be sampled (DB down, no such
@@ -162,7 +184,8 @@ def _build_values_hint():
     about genuinely isn't there.
     """
     try:
-        column_values = get_column_values()
+        if column_values is None:
+            column_values = get_column_values()
     except Exception:
         return ""
 
@@ -202,9 +225,9 @@ the column stores "Ananya Singh"), match the stored value with LIKE '%ananya%' \
 instead of an exact `= 'ananya'`."""
 
 
-def _values_section():
+def _values_section(column_values=None):
     """The value-hint block plus its rules, or "" when values are unavailable."""
-    hint = _build_values_hint()
+    hint = _build_values_hint(column_values)
     if not hint:
         return ""
     return f"\n{hint}\nRules:\n{_VALUE_GROUNDING_RULES}\n"
@@ -229,43 +252,47 @@ EMPTY_RESULT_HINT = (
 )
 
 
-def _convert_with_grok(question, schema, previous_sql=None, error=None):
+def _convert_with_grok(question, schema, previous_sql=None, error=None,
+                       dialect="mysql", column_values=None):
     client = _get_xai_client()
 
     response = client.chat.completions.create(
         model=XAI_MODEL,
-        messages=[{"role": "user", "content": _build_prompt(question, schema, previous_sql, error)}],
+        messages=[{"role": "user", "content": _build_prompt(question, schema, previous_sql, error, dialect, column_values)}],
     )
     return _clean_sql(response.choices[0].message.content)
 
 
-def _convert_with_groq(question, schema, previous_sql=None, error=None):
+def _convert_with_groq(question, schema, previous_sql=None, error=None,
+                       dialect="mysql", column_values=None):
     client = _get_groq_client()
 
     response = client.chat.completions.create(
         model=GROQ_MODEL,
-        messages=[{"role": "user", "content": _build_prompt(question, schema, previous_sql, error)}],
+        messages=[{"role": "user", "content": _build_prompt(question, schema, previous_sql, error, dialect, column_values)}],
     )
     return _clean_sql(response.choices[0].message.content)
 
 
-def _convert_with_gemini(question, schema, previous_sql=None, error=None):
+def _convert_with_gemini(question, schema, previous_sql=None, error=None,
+                         dialect="mysql", column_values=None):
     from google import genai
     client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
     response = client.models.generate_content(
         model="gemini-2.0-flash",
-        contents=_build_prompt(question, schema, previous_sql, error)
+        contents=_build_prompt(question, schema, previous_sql, error, dialect, column_values)
     )
     return _clean_sql(response.text)
 
 
-def _convert_with_ollama(question, schema, previous_sql=None, error=None):
+def _convert_with_ollama(question, schema, previous_sql=None, error=None,
+                         dialect="mysql", column_values=None):
     client = _get_ollama_client()
 
     response = client.chat.completions.create(
         model=OLLAMA_MODEL,
-        messages=[{"role": "user", "content": _build_prompt(question, schema, previous_sql, error)}],
+        messages=[{"role": "user", "content": _build_prompt(question, schema, previous_sql, error, dialect, column_values)}],
         temperature=0,
     )
     return _clean_sql(response.choices[0].message.content)

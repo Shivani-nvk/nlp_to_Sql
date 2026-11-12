@@ -7,3 +7,5 @@ werkzeug
 nltk
 google-genai
 openai
+SQLAlchemy>=2.0.0
+psycopg2-binary

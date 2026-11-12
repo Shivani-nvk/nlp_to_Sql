@@ -1,3 +1,5 @@
+import json
+
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt
 from services.admin_service import (
@@ -35,14 +37,22 @@ def admin_get_row():
     row_id = request.args.get("id")
     column = request.args.get("column")
     value = request.args.get("value")
+    # NEW: composite key lookup (marks / performance)
+    key = request.args.get("key")
+    if key:
+        try:
+            key = json.loads(key)
+        except ValueError:
+            return jsonify({"error": "'key' must be valid JSON."}), 400
+    # END NEW
 
     if not table:
         return jsonify({"error": "Request must include 'table' query param."}), 400
 
-    if (row_id is None or row_id == "") and (column is None or value is None or value == ""):
-        return jsonify({"error": "Request must include 'id' or ('column' and 'value')."}), 400
+    if not key and (row_id is None or row_id == "") and (column is None or value is None or value == ""):
+        return jsonify({"error": "Request must include 'key', 'id' or ('column' and 'value')."}), 400
 
-    result = get_row(table, row_id=row_id, column=column, value=value)
+    result = get_row(table, row_id=row_id, column=column, value=value, key=key or None)
     return jsonify(result), (200 if result.get("success") else 400)
 
 
@@ -75,11 +85,14 @@ def admin_update():
     table = body.get("table")
     row_id = body.get("id")
     data = body.get("data")
+    # NEW
+    key = body.get("key")
 
-    if not table or row_id is None or not isinstance(data, dict):
-        return jsonify({"error": "Request must include 'table', 'id', and 'data'."}), 400
+    if not table or (row_id is None and not key) or not isinstance(data, dict):
+        return jsonify({"error": "Request must include 'table', 'id' (or 'key'), and 'data'."}), 400
 
-    result = update_row(table, row_id, data)
+    result = update_row(table, row_id, data, key=key)
+    # END NEW
     return jsonify(result), (200 if result.get("success") else 400)
 
 
@@ -95,14 +108,17 @@ def admin_delete():
     row_id = body.get("id")
     data = body.get("data")
     confirm = body.get("confirm", False)
+    # NEW
+    key = body.get("key")
+    # END NEW
 
     if not table:
         return jsonify({"error": "Request must include 'table'."}), 400
 
-    if (row_id is None or str(row_id).strip() == "") and (not data or not isinstance(data, dict)):
-        return jsonify({"error": "Request must include 'id' or 'data' with column criteria."}), 400
+    if not key and (row_id is None or str(row_id).strip() == "") and (not data or not isinstance(data, dict)):
+        return jsonify({"error": "Request must include 'key', 'id' or 'data' with column criteria."}), 400
 
-    result = delete_row(table, row_id=row_id, data=data, confirm=confirm)
+    result = delete_row(table, row_id=row_id, data=data, confirm=confirm, key=key)
     return jsonify(result), (200 if result.get("success") else 400)
 
 

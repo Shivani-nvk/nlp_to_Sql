@@ -29,6 +29,11 @@ const chatSubmitBtn = document.getElementById("chatSubmitBtn");
 let lastSQL = "";
 let authMode = "login"; // or "signup"
 let originalQuestion = "";
+// ---------------- DATABASE / PLUGIN SOURCE STATE ----------------
+let currentDbMode = localStorage.getItem("dbMode") || "local"; // "local" or "plugin"
+let currentPluginApiKey = localStorage.getItem("pluginApiKey") || "demo";
+let currentPluginDbUrl = localStorage.getItem("pluginDbUrl") || "";
+
 
 // ---------------- THEME MANAGEMENT ----------------
 
@@ -195,12 +200,224 @@ function logout() {
   setAuthStatus("Logged out.", false);
 }
 
-// On load: if we already have a token, skip straight to the app
-if (getToken()) {
+
+// ---------------- DATABASE / PLUGIN MANAGEMENT FUNCTIONS ----------------
+
+function updateDbBadge() {
+  const label = document.getElementById("dbSourceLabel");
+  const dot = document.getElementById("dbHeaderDot");
+  const activeDot = document.getElementById("dbActiveDot");
+  const activeTitle = document.getElementById("dbActiveTitle");
+  const activePill = document.getElementById("dbActivePill");
+  const activeMeta = document.getElementById("dbActiveMeta");
+  const presetLocal = document.getElementById("presetLocalBtn");
+  const presetDemo = document.getElementById("presetDemoBtn");
+
+  if (currentDbMode === "plugin") {
+    const isDemo = currentPluginApiKey === "demo" && !currentPluginDbUrl;
+    if (label) label.textContent = isDemo ? "DB: Org Demo (SQLite)" : `DB: Org (${currentPluginApiKey || "Custom"})`;
+    if (dot) dot.className = "db-status-dot active";
+    if (activeDot) activeDot.className = "db-indicator active";
+    if (activeTitle) activeTitle.textContent = isDemo ? "Organization Demo (SQLite)" : "Custom Organization Database";
+    if (activePill) {
+      activePill.textContent = "Plugin Mode";
+      activePill.style.background = "rgba(34, 197, 94, 0.12)";
+      activePill.style.color = "#16a34a";
+    }
+    if (activeMeta) {
+      activeMeta.textContent = isDemo
+        ? "Connected to pre-seeded enterprise database (employees, orders). Using agentic self-healing AI."
+        : `Connected via ${currentPluginDbUrl ? "custom URL" : "API key: " + currentPluginApiKey}. Using dynamic schema AI.`;
+    }
+    if (presetLocal) presetLocal.classList.remove("active");
+    if (presetDemo) presetDemo.classList.toggle("active", isDemo);
+  } else {
+    if (label) label.textContent = "DB: Local MySQL";
+    if (dot) dot.className = "db-status-dot active";
+    if (activeDot) activeDot.className = "db-indicator active";
+    if (activeTitle) activeTitle.textContent = "Local MySQL Database";
+    if (activePill) {
+      activePill.textContent = "Default";
+      activePill.style.background = "var(--accent-soft)";
+      activePill.style.color = "var(--accent)";
+    }
+    if (activeMeta) activeMeta.textContent = "Connected to demo schema (students, faculty, courses, projects).";
+    if (presetLocal) presetLocal.classList.add("active");
+    if (presetDemo) presetDemo.classList.remove("active");
+  }
+
+  updateSampleChips();
+}
+
+function updateSampleChips() {
+  const chipsContainer = document.getElementById("chips");
+  if (!chipsContainer) return;
+
+  if (currentDbMode === "plugin" && currentPluginApiKey === "demo" && !currentPluginDbUrl) {
+    chipsContainer.innerHTML = `
+      <button type="button" class="chip" data-q="show all employees">show all employees</button>
+      <button type="button" class="chip" data-q="employees with salary above 80000">salary above 80000</button>
+      <button type="button" class="chip" data-q="orders with status paid">orders with status paid</button>
+      <button type="button" class="chip" data-q="average salary per department">avg salary per department</button>
+      <button type="button" class="chip" data-q="total order amount per customer">total amount per customer</button>
+    `;
+  } else if (currentDbMode === "local") {
+    chipsContainer.innerHTML = `
+      <button type="button" class="chip" data-q="show all courses">show all courses</button>
+      <button type="button" class="chip" data-q="show marks above 60">marks above 60</button>
+      <button type="button" class="chip" data-q="show students with marks above 80">students with marks above 80</button>
+      <button type="button" class="chip" data-q="average marks per subject">average marks per subject</button>
+      <button type="button" class="chip" data-q="show project names along with their lead employees">projects and their leads</button>
+    `;
+  }
+}
+
+function selectDbPreset(preset) {
+  if (preset === "local") {
+    currentDbMode = "local";
+    currentPluginDbUrl = "";
+    localStorage.setItem("dbMode", "local");
+    localStorage.removeItem("pluginDbUrl");
+    fullSchemaCache = null;
+    updateDbBadge();
+    showToast("Switched to Local MySQL Database");
+    if (!getToken()) {
+      showAuthScreen();
+    } else {
+      showApp();
+    }
+  } else if (preset === "demo") {
+    currentDbMode = "plugin";
+    currentPluginApiKey = "demo";
+    currentPluginDbUrl = "";
+    localStorage.setItem("dbMode", "plugin");
+    localStorage.setItem("pluginApiKey", "demo");
+    localStorage.removeItem("pluginDbUrl");
+    fullSchemaCache = null;
+    updateDbBadge();
+    showToast("Switched to Org Demo Database (SQLite)");
+    showAppForPlugin();
+  }
+  closeDrawer("dbDrawer");
+}
+
+function showAppForPlugin() {
+  authScreen.style.display = "none";
+  appSection.style.display = "block";
+  userBadge.style.display = "flex";
+  userBadgeText.textContent = `Plugin Mode (${currentPluginApiKey || "Custom DB"})`;
+  
+  const schemaBtn = document.getElementById("schemaToggleBtn");
+  if (schemaBtn) schemaBtn.style.display = "inline-flex";
+  const historyBtn = document.getElementById("historyToggleBtn");
+  if (historyBtn) historyBtn.style.display = "inline-flex";
+  
+  adminSection.style.display = "none";
+  fullSchemaCache = null;
+  loadSchemaTree();
+}
+
+function testAndApplyDbConnection() {
+  const keyInput = document.getElementById("dbTenantKey");
+  const urlInput = document.getElementById("dbCustomUrl");
+  const statusEl = document.getElementById("dbConnectStatus");
+  const btn = document.getElementById("dbConnectBtn");
+
+  const apiKey = (keyInput ? keyInput.value.trim() : "") || "demo";
+  const dbUrl = urlInput ? urlInput.value.trim() : "";
+
+  if (btn) btn.disabled = true;
+  if (statusEl) {
+    statusEl.textContent = "Connecting...";
+    statusEl.classList.remove("is-error");
+  }
+
+  const headers = { "Content-Type": "application/json" };
+  const body = {};
+  if (apiKey) {
+    headers["X-API-Key"] = apiKey;
+    body.api_key = apiKey;
+  }
+  if (dbUrl) {
+    headers["X-Database-URL"] = dbUrl;
+    body.database_url = dbUrl;
+  }
+
+  fetch(API_BASE + "/api/v1/plugin/connect", {
+    method: "POST",
+    headers: headers,
+    body: JSON.stringify(body)
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (btn) btn.disabled = false;
+      if (!ok || data.ok === false) {
+        if (statusEl) {
+          statusEl.textContent = data.error || "Connection failed";
+          statusEl.classList.add("is-error");
+        }
+        showToast("Connection failed: " + (data.error || "Check credentials"), true);
+        return;
+      }
+
+      currentDbMode = "plugin";
+      currentPluginApiKey = apiKey;
+      currentPluginDbUrl = dbUrl;
+      localStorage.setItem("dbMode", "plugin");
+      localStorage.setItem("pluginApiKey", apiKey);
+      if (dbUrl) {
+        localStorage.setItem("pluginDbUrl", dbUrl);
+      } else {
+        localStorage.removeItem("pluginDbUrl");
+      }
+
+      if (statusEl) {
+        statusEl.textContent = `Connected! (${data.dialect || "SQL"}, ${data.table_count || 0} tables)`;
+        statusEl.classList.remove("is-error");
+      }
+
+      fullSchemaCache = null;
+      updateDbBadge();
+      showToast(`Connected to ${data.dialect || "database"} with ${data.table_count || 0} tables!`);
+      showAppForPlugin();
+      setTimeout(() => closeDrawer("dbDrawer"), 1200);
+    })
+    .catch((err) => {
+      if (btn) btn.disabled = false;
+      if (statusEl) {
+        statusEl.textContent = "Could not reach server.";
+        statusEl.classList.add("is-error");
+      }
+      showToast("Server connection error", true);
+    });
+}
+
+function copyEmbedSnippet(codeId, btn) {
+  const el = document.getElementById(codeId);
+  if (!el) return;
+  const text = el.textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const originalText = btn.textContent;
+    btn.textContent = "Copied to Clipboard!";
+    btn.classList.add("copied");
+    showToast("Code snippet copied!");
+    setTimeout(() => {
+      btn.textContent = originalText;
+      btn.classList.remove("copied");
+    }, 2000);
+  });
+}
+
+// On load: check database mode and session
+updateDbBadge();
+if (currentDbMode === "plugin") {
+  showAppForPlugin();
+} else if (getToken()) {
   showApp();
 } else {
   showAuthScreen();
 }
+
 
 // ---------------- LOGIN / SIGNUP FORM ----------------
 
@@ -418,7 +635,7 @@ function showSQL() {
   }
 
   const token = getToken();
-  if (!token) {
+  if (currentDbMode === "local" && !token) {
     showAuthScreen();
     setAuthStatus("Please log in first.", true);
     return;
@@ -434,13 +651,28 @@ function showSQL() {
 
   const startTime = performance.now();
 
-  fetch(API_BASE + "/query", {
+  let endpoint = API_BASE + "/query";
+  let reqHeaders = { "Content-Type": "application/json" };
+  let reqBody = { question: question };
+
+  if (currentDbMode === "plugin") {
+    endpoint = API_BASE + "/api/v1/plugin/query";
+    if (currentPluginApiKey) {
+      reqHeaders["X-API-Key"] = currentPluginApiKey;
+      reqBody.api_key = currentPluginApiKey;
+    }
+    if (currentPluginDbUrl) {
+      reqHeaders["X-Database-URL"] = currentPluginDbUrl;
+      reqBody.database_url = currentPluginDbUrl;
+    }
+  } else {
+    reqHeaders["Authorization"] = "Bearer " + token;
+  }
+
+  fetch(endpoint, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": "Bearer " + token
-    },
-    body: JSON.stringify({ question: question })
+    headers: reqHeaders,
+    body: JSON.stringify(reqBody)
   })
     .then((response) => response.json().then((data) => ({ status: response.status, data })))
     .then(({ status, data }) => {
@@ -1813,6 +2045,33 @@ function loadSchemaTree() {
 
   if (fullSchemaCache) {
     renderSchemaTree(fullSchemaCache);
+    return;
+  }
+
+  if (currentDbMode === "plugin") {
+    const headers = {};
+    if (currentPluginApiKey) headers["X-API-Key"] = currentPluginApiKey;
+    if (currentPluginDbUrl) headers["X-Database-URL"] = currentPluginDbUrl;
+
+    fetch(API_BASE + "/api/v1/plugin/schema", { headers: headers })
+      .then((r) => r.json())
+      .then((data) => {
+        const schema = {};
+        if (data.tables) {
+          data.tables.forEach((t) => {
+            schema[t.name] = {};
+            t.columns.forEach((c) => {
+              schema[t.name][c.name] = c.type;
+            });
+          });
+        }
+        fullSchemaCache = schema;
+        renderSchemaTree(schema);
+      })
+      .catch((err) => {
+        container.innerHTML = `<div class="empty-history-text">Could not load schema from plugin backend.</div>`;
+        console.log(err);
+      });
     return;
   }
 

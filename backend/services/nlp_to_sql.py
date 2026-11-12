@@ -5158,3 +5158,258 @@ def _dropped_value_spans(tokens, haystack, explained):
             continue
         dropped.append(value)
     return dropped
+
+
+# ==================== QUESTION RELEVANCE DIAGNOSIS ====================
+# has_recognizable_keywords() answers "did the rule engine understand
+# this?". It does not answer "is this question about this database at
+# all?".
+#
+# That second question matters because BOTH engines will happily invent an
+# answer for a question that has nothing to do with the schema: the rule
+# engine falls through to a default SELECT *, and the agentic fallback,
+# having been handed "heyy supp" and a schema, returns a confident
+# "SELECT * FROM employee_info". Both are confidently wrong, and the user
+# has no way to tell that the question was simply not understood.
+#
+# diagnose_question() runs BEFORE any SQL is generated and separates the
+# two situations the old pipeline conflated:
+#   - the rule engine is weak but the question is real  -> let it escalate
+#     to the agentic engine exactly as it does today
+#   - the question shares no vocabulary with the database at all -> say so,
+#     and say why, instead of burning an LLM call on a guess
+#
+# It is deliberately an ADDITIONAL filter, never a replacement: the router
+# still consults has_recognizable_keywords() before rejecting, so anything
+# the rule engine can genuinely handle keeps working.
+
+# Greetings, farewells and pleasantries. Matched by prefix so "heyy" and
+# "supp" are recognised, and only ever consulted once the question has
+# already failed to match any table, column or value - so a word like
+# "good" is harmless here ("good marks" has already matched "marks").
+_CHATTER_STEMS = (
+    "hey", "hi", "hii", "helo", "hello", "yo", "sup", "supp", "whatsup",
+    "wassup", "howare", "howsyou", "bye", "cya", "later", "greetings",
+    "thanks", "thankyou", "thx", "cheers", "ok", "okay", "cool", "nice",
+    "awesome", "great", "wow", "hmm", "haha", "lol", "welcome", "sure",
+    "yeah", "yep", "yup", "nope", "morning", "afternoon", "evening",
+    "night", "goodday", "good", "gudmorning", "meet", "seeing", "again", "friend",
+)
+
+# Words that describe an action ("show", "count", "average") rather than
+# naming a thing. They prove the user is speaking the language of SQL, but
+# on their own they say nothing about WHICH table to read.
+_INTENT_SOURCES = (
+    INTENT_MAP, CONDITION_MAP, AGGREGATE_MAP, SORT_DIRECTION_MAP,
+    JOIN_TABLE_HINTS, ORDER_TRIGGER_WORDS, DATE_TRIGGER_WORDS,
+    LIKE_FILLER_WORDS, JOIN_RELATION_VERBS, NUMBER_WORDS,
+)
+
+# Cached vocabularies, keyed by a cheap fingerprint of the live schema so a
+# DDL change (or a fresh value sample) rebuilds them. Rebuilt in place; the
+# same contract the other keyword maps in this module use.
+_RELEVANCE_CACHE = {"fingerprint": None, "entity": None, "intent": None}
+
+
+def _is_chatter(token):
+    if not token.isalpha():
+        return True
+    for stem in _CHATTER_STEMS:
+        if token == stem or (len(stem) >= 3 and token.startswith(stem)):
+            return True
+    return False
+
+
+# Grammar and question words. These carry no schema meaning, so a question
+# made only of them is small talk, not a mis-typed query. Consulted only
+# after the schema match has already failed, so it cannot mask a real
+# question.
+_FILLER_WORDS = (
+    set(_GENERIC_REQUEST_WORDS)
+    | set(_NAME_STOP_WORDS)
+    | set(NON_LITERAL_WORDS)
+    | {
+        "you", "your", "yours", "u", "i", "im", "ive", "my", "mine", "me",
+        "how", "why", "when", "where", "who", "whom", "whose", "which",
+        "what", "whats", "was", "were", "is", "are", "am", "do", "does",
+        "did", "can", "could", "would", "should", "will", "shall", "may",
+        "here", "there", "up", "down", "out", "about", "just", "really",
+        "very", "much", "many", "well", "ever", "never", "really", "thing",
+        "things", "stuff", "something", "anything", "someone", "anybody",
+    }
+)
+
+
+def _relevance_vocabulary():
+    """
+    Builds two sets from the LIVE schema, split by what they prove:
+
+      entity - tables, columns and real stored values. Naming one of these
+               means the question is about this database.
+      intent - action words (show / count / average / above / top). These
+               make the question sound like a query but don't say what to
+               read, so they are tracked separately.
+
+    Fingerprinted so this is not rebuilt on every question; the fingerprint
+    changes whenever a table or column is added or dropped, or the sampled
+    value set moves.
+    """
+    schema = get_schema() or {}
+    fingerprint = (
+        tuple(sorted(schema.keys())),
+        tuple(sorted((t, len(c)) for t, c in schema.items())),
+        len(COLUMN_VALUES),
+    )
+    if _RELEVANCE_CACHE["fingerprint"] == fingerprint:
+        return _RELEVANCE_CACHE["entity"], _RELEVANCE_CACHE["intent"]
+
+    entity, intent = set(), set()
+
+    def add(target, term):
+        if term is None:
+            return
+        term = str(term).lower().strip()
+        if not term or len(term) < 2:
+            return
+        # "student_info" is a table nobody types; "student info" is.
+        target.add(term.replace("_", " ").strip())
+
+    for table, columns in schema.items():
+        add(entity, table)
+        for column in columns or {}:
+            add(entity, column)
+    for source in (TABLE_MAP, COLUMN_MAP):
+        for alias, target_name in source.items():
+            add(entity, alias)
+            add(entity, target_name)
+    for value in list(DEPARTMENTS) + list(CITIES) + list(GENDERS):
+        add(entity, value)
+    for values in COLUMN_VALUES.values():
+        for value in values:
+            add(entity, value)
+    for source in _INTENT_SOURCES:
+        # Some of these are alias->target maps, some are plain word lists.
+        items = source.items() if hasattr(source, "items") else ((w, None) for w in source)
+        for alias, target_name in items:
+            add(intent, alias)
+            if isinstance(target_name, str):
+                add(intent, target_name)
+
+    _RELEVANCE_CACHE.update({"fingerprint": fingerprint, "entity": entity, "intent": intent})
+    return entity, intent
+
+
+# Nouns that mean "the data as a whole" without naming a table. Deliberately
+# narrower than _GENERIC_REQUEST_WORDS, which also contains bare verbs
+# ("tell", "give", "show") that would wave through "tell me a joke".
+_WHOLE_DATABASE_REQUEST_WORDS = {
+    "everything", "everybody", "everyone", "anything", "anybody", "all",
+    "details", "detail", "info", "information", "data", "record", "records",
+    "row", "rows", "table", "summary", "overview", "contents", "entries",
+}
+
+
+def _unanswerable(code, reason, question=""):
+    """The standard rejection payload. `reason` is the whole user-facing
+    message - a few words, one line. It renders in the status line, and the
+    example chips on the prompt already show what a real question looks
+    like, so a rejected one needs no explanation of its own."""
+    return {
+        "answerable": False,
+        "code": code,
+        "message": reason,
+        "matched": [],
+        "unmatched": question,
+    }
+
+
+def diagnose_question(question):
+    """
+    Decides whether a question is about this database at all, before any SQL
+    is generated.
+
+    Returns a dict:
+      {
+        "answerable": bool,
+        "code": "ok" | "empty" | "chatter" | "no_subject" | "unrelated",
+        "message": str,        # user-facing explanation when answerable is False
+        "matched": [str],      # entity terms found ("students", "marks")
+        "unmatched": str,      # the question, for the error message
+      }
+
+    "ok" means the question named a table, column or stored value, so the
+    normal pipeline (rule engine, then the agentic fallback) should run
+    untouched. This function never blocks a question the rule engine could
+    have answered - it only catches questions with no schema vocabulary in
+    them at all, which no amount of LLM help can make answerable.
+    """
+    raw = (question or "").strip()
+    tokens = re.findall(r"[a-z0-9_]+", raw.lower())
+
+    if not tokens:
+        return _unanswerable("empty", "No question given.", raw)
+
+    # Same live-schema sync convert_to_sql() does, so a newly added table or
+    # column counts as a match instead of being read as an unknown word.
+    refresh_schema_maps()
+    refresh_column_values()
+
+    entity, intent = _relevance_vocabulary()
+
+    # Match single words AND adjacent pairs, so multiword columns ("student
+    # name"), multiword table names ("student info") and multiword stored
+    # values ("data structures") are all found.
+    candidates = set(tokens)
+    candidates |= {" ".join(tokens[i:i + 2]) for i in range(len(tokens) - 1)}
+
+    found_entity = sorted(c for c in candidates if c in entity)
+    if found_entity:
+        return {
+            "answerable": True,
+            "code": "ok",
+            "message": "",
+            "matched": found_entity,
+            "unmatched": "",
+        }
+    # "show me everything" / "count all rows" name no table either, but they
+    # are not unrelated to the database - they are whole-database requests
+    # that this project has always answered with its default table. Rejecting
+    # them would change behaviour the user did not ask to change, and the
+    # engine already returns a result for them, so they stay answerable and
+    # the existing default-table handling applies as before.
+    #
+    # Deliberately NOT _GENERIC_REQUEST_WORDS: that set also holds bare verbs
+    # like "tell" and "give", which would wave through "tell me a joke".
+    generic = sorted({t for t in tokens if t in _WHOLE_DATABASE_REQUEST_WORDS})
+    if generic:
+        return {
+            "answerable": True,
+            "code": "ok",
+            "message": "",
+            "matched": generic,
+            "unmatched": "",
+        }
+
+    # Action words alone prove the user is speaking the language of SQL but
+    # say nothing about which table to read. Copulas and articles are in
+    # CONDITION_MAP for filtering purposes and are far too weak to count
+    # here: "what is the weather" contains "is" and would otherwise be
+    # reported as a request to look something up.
+    _WEAK_INTENT = {
+        "is", "are", "was", "were", "be", "been", "being", "equals", "equal",
+        "the", "a", "an", "of", "in", "on", "at", "to", "and", "or", "by",
+        "with", "for", "from", "that", "this",
+    }
+    found_intent = sorted(
+        c for c in candidates if c in intent and c not in _WEAK_INTENT
+    )
+    if found_intent:
+        return _unanswerable("no_subject", "Name a table to query.", raw)
+
+    # Nothing matched. Decide between small talk and a real question that
+    # simply has nothing to do with this schema.
+    content = [t for t in tokens if not _is_chatter(t) and t not in _FILLER_WORDS]
+    if not content:
+        return _unanswerable("chatter", "Not a question about the data.", raw)
+
+    return _unanswerable("unrelated", "No table or column matched.", raw)

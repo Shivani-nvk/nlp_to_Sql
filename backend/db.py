@@ -20,3 +20,9 @@ def get_db_connection():
             database=os.environ.get("DB_NAME"),
         )
     return _pool.get_connection()
+
+
+# Multi-tenant and dynamic database support via SQLAlchemy
+def get_engine(connection_url=None, tenant_id=None):
+    from services.tenant_manager import get_tenant_engine
+    return get_tenant_engine(connection_url=connection_url, tenant_id=tenant_id)

@@ -19,6 +19,22 @@
       <span>nlq<span class="wordmark-arrow">&rarr;</span>sql</span>
     </div>
     <div class="header-right">
+      <button type="button" class="header-icon-btn db-source-btn" id="dbSourceBtn" title="Database / Plugin Source" onclick="toggleDrawer('dbDrawer')">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+          <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+          <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+        </svg>
+        <span class="db-status-dot active" id="dbHeaderDot"></span>
+        <span id="dbSourceLabel">DB: Local MySQL</span>
+      </button>
+      <button type="button" class="header-icon-btn embed-toggle-btn" id="embedToggleBtn" title="Embed as Plugin in your App" onclick="toggleDrawer('embedDrawer')">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="16 18 22 12 16 6"></polyline>
+          <polyline points="8 6 2 12 8 18"></polyline>
+        </svg>
+        <span>Embed Plugin</span>
+      </button>
       <button type="button" class="header-icon-btn" id="schemaToggleBtn" title="Database Schema Explorer" onclick="toggleDrawer('schemaDrawer')" style="display:none;">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M4 6h16M4 12h16M4 18h16"></path>
@@ -49,7 +65,7 @@
           <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
         </svg>
       </button>
-      <span class="header-tag">Local dev tool</span>
+      <span class="header-tag" id="headerTag">Plugin Ready</span>
       <div class="user-badge" id="userBadge" style="display:none;">
         <span class="user-badge-indicator"></span>
         <span id="userBadgeText"></span>
@@ -93,6 +109,15 @@
             <span class="btn-label" id="authSubmitLabel">Log in</span>
           </button>
           <span id="authStatusText" class="status-text"></span>
+        </div>
+
+        <div class="auth-plugin-divider">
+          <span>or explore without login</span>
+        </div>
+        <div class="auth-plugin-actions" style="margin-bottom: 14px;">
+          <button type="button" class="btn btn-secondary btn-small" onclick="selectDbPreset('demo')" style="width:100%; justify-content:center;">
+            <span>⚡ Open in Plugin Mode (Demo Org SQLite)</span>
+          </button>
         </div>
 
         <p class="auth-toggle">
@@ -499,6 +524,151 @@
   <div class="drawer-body">
     <div class="history-list" id="historyList">
       <div class="empty-history-text">No queries executed yet.</div>
+    </div>
+  </div>
+</aside>
+
+<!-- ---------------- DATABASE / PLUGIN DRAWER ---------------- -->
+<aside class="drawer drawer-wide" id="dbDrawer" aria-label="Database Settings">
+  <div class="drawer-header">
+    <div class="drawer-title-group">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+      </svg>
+      <h3>Database & Plugin Source</h3>
+    </div>
+    <button type="button" class="drawer-close-btn" onclick="closeDrawer('dbDrawer')" title="Close">&times;</button>
+  </div>
+  <div class="drawer-body">
+    <p class="drawer-tip">Select which database your natural language queries run against. External databases use the dynamic AI engine.</p>
+    
+    <div class="db-source-card" id="dbStatusCard">
+      <div class="db-source-header">
+        <span class="db-indicator active" id="dbActiveDot"></span>
+        <strong id="dbActiveTitle">Local MySQL Database</strong>
+        <span class="db-pill" id="dbActivePill">Default</span>
+      </div>
+      <p class="db-source-meta" id="dbActiveMeta">Connected to demo schema (students, faculty, courses, projects).</p>
+    </div>
+
+    <div class="db-presets-group">
+      <label class="field-label">Quick Presets</label>
+      <div class="db-presets-buttons">
+        <button type="button" class="btn btn-secondary btn-small preset-btn active" id="presetLocalBtn" onclick="selectDbPreset('local')">
+          <span>● Local MySQL</span>
+        </button>
+        <button type="button" class="btn btn-secondary btn-small preset-btn" id="presetDemoBtn" onclick="selectDbPreset('demo')">
+          <span>⚡ Org Demo (SQLite)</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="db-config-section">
+      <label class="field-label">Custom Organization Database</label>
+      
+      <div class="field-row">
+        <label class="field-label-sm" for="dbTenantKey">Organization API Key</label>
+        <input type="text" id="dbTenantKey" class="field-input" placeholder="e.g. demo, acme_corp" value="demo">
+        <span class="field-hint">Configured server-side in <code>PLUGIN_TENANTS</code>.</span>
+      </div>
+
+      <div class="field-row" style="margin-top: 10px;">
+        <label class="field-label-sm" for="dbCustomUrl">Direct Connection URI (Optional)</label>
+        <input type="text" id="dbCustomUrl" class="field-input" placeholder="e.g. sqlite:///data.db or postgresql://user:pass@host/db">
+        <span class="field-hint">Supports SQLite, PostgreSQL, MySQL via SQLAlchemy.</span>
+      </div>
+
+      <div class="db-action-row">
+        <button type="button" class="btn btn-primary btn-small" id="dbConnectBtn" onclick="testAndApplyDbConnection()">
+          <span id="dbConnectLabel">Connect & Switch</span>
+        </button>
+        <span id="dbConnectStatus" class="status-text"></span>
+      </div>
+    </div>
+
+    <div class="db-info-box">
+      <strong>🔒 Enterprise Security:</strong>
+      <ul>
+        <li>Strict read-only safety: <code>SELECT</code> queries only.</li>
+        <li>Destructive commands (DROP, DELETE, UPDATE) are blocked.</li>
+        <li>Schema is discovered dynamically without saving raw records.</li>
+      </ul>
+    </div>
+  </div>
+</aside>
+
+<!-- ---------------- EMBED PLUGIN DRAWER ---------------- -->
+<aside class="drawer drawer-wide" id="embedDrawer" aria-label="Embed Plugin">
+  <div class="drawer-header">
+    <div class="drawer-title-group">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="16 18 22 12 16 6"></polyline>
+        <polyline points="8 6 2 12 8 18"></polyline>
+      </svg>
+      <h3>Embed as Plugin</h3>
+    </div>
+    <button type="button" class="drawer-close-btn" onclick="closeDrawer('embedDrawer')" title="Close">&times;</button>
+  </div>
+  <div class="drawer-body">
+    <p class="drawer-tip">Embed this natural language query assistant directly into your company portal or internal website.</p>
+
+    <div class="embed-section">
+      <div class="embed-section-title">
+        <strong>1. Drop-in HTML Widget</strong>
+        <span class="db-pill">Zero dependencies</span>
+      </div>
+      <p class="embed-section-sub">Add this single <code>&lt;script&gt;</code> tag to any page. It adds a floating, branded query widget.</p>
+      
+      <div class="code-snippet-wrap">
+        <pre><code id="embedScriptCode">&lt;!-- NLP to SQL Assistant Widget --&gt;
+&lt;script 
+  src="http://127.0.0.1:5000/static/nlp-widget.js" 
+  data-api-base="http://127.0.0.1:5000" 
+  data-api-key="demo" 
+  data-title="Data Assistant" 
+  data-theme="auto"&gt;
+&lt;/script&gt;</code></pre>
+        <button type="button" class="btn btn-ghost btn-small copy-btn" onclick="copyEmbedSnippet('embedScriptCode', this)">Copy Widget Code</button>
+      </div>
+
+      <div style="margin-top: 12px;">
+        <a href="/plugin/demo" target="_blank" class="btn btn-secondary btn-small" style="display:inline-flex; align-items:center; gap:6px; text-decoration:none;">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+          <span>Launch Live Widget Demo</span>
+        </a>
+      </div>
+    </div>
+
+    <div class="embed-section" style="margin-top: 20px;">
+      <div class="embed-section-title">
+        <strong>2. Headless REST API</strong>
+        <span class="db-pill">cURL / Backend</span>
+      </div>
+      <p class="embed-section-sub">Query your database programmatically from your backend, microservice, or React/Vue app.</p>
+      
+      <div class="code-snippet-wrap">
+        <pre><code id="embedCurlCode">curl -X POST http://127.0.0.1:5000/api/v1/plugin/query \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: demo" \
+  -d '{"question": "show all employees with salary above 80000"}'</code></pre>
+        <button type="button" class="btn btn-ghost btn-small copy-btn" onclick="copyEmbedSnippet('embedCurlCode', this)">Copy cURL</button>
+      </div>
+    </div>
+
+    <div class="embed-section" style="margin-top: 20px;">
+      <div class="embed-section-title">
+        <strong>3. Supported Databases</strong>
+      </div>
+      <div class="db-dialect-tags">
+        <span class="dialect-tag">PostgreSQL</span>
+        <span class="dialect-tag">MySQL</span>
+        <span class="dialect-tag">SQLite</span>
+        <span class="dialect-tag">MS SQL Server</span>
+        <span class="dialect-tag">Snowflake</span>
+        <span class="dialect-tag">MariaDB</span>
+      </div>
     </div>
   </div>
 </aside>

@@ -15,10 +15,13 @@ Flow:
 """
 
 from db import get_db_connection
-from services.nlp_to_sql import convert_to_sql, has_recognizable_keywords
-from services.schema_service import get_schema
+from services.nlp_to_sql import (
+    convert_to_sql, has_recognizable_keywords, diagnose_question
+)
+from services.schema_service import get_schema, get_column_values
 from services.llm_fallback import llm_fallback_convert, EMPTY_RESULT_HINT
 from services.sql_validator import validate_sql, execute_sql_safe
+from services.tenant_manager import execute_tenant_sql
 
 try:
     from nltk import word_tokenize
@@ -33,6 +36,9 @@ SOURCE_RULE_BASED = "rule_based"
 SOURCE_AGENTIC = "agentic"
 SOURCE_AGENTIC_SELF_HEALED = "agentic_self_healed"
 SOURCE_FAILED = "failed"
+# The question shared no vocabulary with the database, so no query was
+# generated at all. Distinct from "failed": nothing was attempted.
+SOURCE_UNANSWERABLE = "unanswerable"
 
 # Questions that match these buckets go STRAIGHT to the agentic path - the
 # rule-based engine's documented weaknesses (three-table chains, EXISTS /
@@ -197,7 +203,8 @@ def _rule_based_sql(question):
     return sql, recognized
 
 
-def _agentic_generate(question, schema, previous_sql=None, error=None, attempt=1):
+def _agentic_generate(question, schema, previous_sql=None, error=None, attempt=1,
+                      dialect="mysql", column_values=None):
     """
     Calls the LLM to generate SQL. When previous_sql + error are provided,
     this is a self-heal/repair call and the prompt asks for a correction.
@@ -205,9 +212,14 @@ def _agentic_generate(question, schema, previous_sql=None, error=None, attempt=1
     """
     try:
         if attempt > 1 and previous_sql and error:
-            repaired = llm_fallback_convert(question, schema, previous_sql=previous_sql, error=error)
+            repaired = llm_fallback_convert(
+                question, schema, previous_sql=previous_sql, error=error,
+                dialect=dialect, column_values=column_values,
+            )
             return repaired
-        return llm_fallback_convert(question, schema)
+        return llm_fallback_convert(
+            question, schema, dialect=dialect, column_values=column_values,
+        )
     except Exception:
         return None
 
@@ -216,7 +228,38 @@ def _execute(query_conn, sql):
     return execute_sql_safe(query_conn, sql)
 
 
-def run_hybrid_query(question, role="user"):
+def _execute_on_target(sql, engine=None):
+    """
+    Default path uses mysql.connector. Plugin/tenant path uses SQLAlchemy.
+    Returns (rows, columns, error).
+    """
+    if engine is not None:
+        return execute_tenant_sql(engine, sql)
+
+    conn = get_db_connection()
+    try:
+        rows, err = _execute(conn, sql)
+        columns = list(rows[0].keys()) if rows else []
+        return rows, columns, err
+    except Exception as e:
+        return None, [], str(e)
+    finally:
+        conn.close()
+
+
+def _result_payload(source, sql, result, repair_attempts, trace, error, columns=None):
+    return {
+        "source": source,
+        "sql": sql,
+        "result": result or [],
+        "columns": columns or (list((result or [{}])[0].keys()) if result else []),
+        "repair_attempts": repair_attempts,
+        "trace": trace,
+        "error": error,
+    }
+
+
+def run_hybrid_query(question, role="user", engine=None, schema=None, is_custom_tenant=False):
     """
     Runs the full hybrid pipeline for a user question.
 
@@ -231,7 +274,42 @@ def run_hybrid_query(question, role="user"):
       }
     """
     trace = []
-    schema = _build_schema_context()
+    if schema is None:
+        schema = get_schema(engine=engine) if engine is not None else _build_schema_context()
+
+    if is_custom_tenant:
+        dialect = getattr(getattr(engine, "dialect", None), "name", "mysql") if engine else "mysql"
+        trace.append("Custom tenant detected; routing directly to the dynamic LLM engine")
+        trace.append("Agentic engine activated")
+        return _agentic_flow(
+            question, schema, trace, role=role, engine=engine, dialect=dialect,
+        )
+
+    # ---------------- 0. RELEVANCE CHECK ----------------
+    # A question that shares no vocabulary with the database cannot be
+    # answered by either engine, but both will still invent an answer for
+    # one: the rule engine falls through to a default SELECT *, and the
+    # agentic fallback, handed "heyy supp" plus a schema, confidently
+    # returns "SELECT * FROM employee_info". Rejecting up front is also
+    # cheaper - it saves an LLM call on a question no LLM can help with.
+    #
+    # This is an extra filter, not a replacement: the rule engine still
+    # gets the final word below, so anything it can genuinely handle keeps
+    # working exactly as before.
+    diagnosis = diagnose_question(question)
+    if not diagnosis["answerable"]:
+        trace.append(
+            f"Question rejected as unrelated to the schema ({diagnosis['code']})"
+        )
+        if has_recognizable_keywords(question):
+            trace.append(
+                "Rule-based engine still recognised a keyword - continuing"
+            )
+        else:
+            trace.append("No table, column or value to query; stopping")
+            return _result_payload(
+                SOURCE_UNANSWERABLE, None, [], 0, trace, diagnosis["message"],
+            )
 
     # Rule-engine-weak buckets (JOIN-heavy, EXISTS, ANY/ALL, subqueries,
     # labeling, etc.) go the agentic path as PRIMARY - the rule engine is
@@ -255,22 +333,13 @@ def run_hybrid_query(question, role="user"):
             trace.append("SQL generated")
             trace.append("SQL validation passed")
 
-            conn = get_db_connection()
-            try:
-                result, err = _execute(conn, rule_sql)
-                if err is None:
-                    trace.append("Query executed successfully")
-                    return {
-                        "source": SOURCE_RULE_BASED,
-                        "sql": rule_sql,
-                        "result": result or [],
-                        "repair_attempts": 0,
-                        "trace": trace,
-                        "error": None,
-                    }
-                trace.append(f"Rule-based query execution failed: {err}")
-            finally:
-                conn.close()
+            result, columns, err = _execute_on_target(rule_sql)
+            if err is None:
+                trace.append("Query executed successfully")
+                return _result_payload(
+                    SOURCE_RULE_BASED, rule_sql, result, 0, trace, None, columns,
+                )
+            trace.append(f"Rule-based query execution failed: {err}")
     else:
         trace.append("Rule-based engine could not resolve query")
 
@@ -279,7 +348,8 @@ def run_hybrid_query(question, role="user"):
     return _agentic_flow(question, schema, trace, role=role)
 
 
-def _agentic_flow(question, schema, trace, role="user", repair_attempts=0):
+def _agentic_flow(question, schema, trace, role="user", repair_attempts=0,
+                  engine=None, dialect="mysql"):
     """
     Runs the agentic engine: generate -> validate -> execute, with a
     bounded self-healing loop (max MAX_REPAIR_ATTEMPTS total attempts).
@@ -287,22 +357,23 @@ def _agentic_flow(question, schema, trace, role="user", repair_attempts=0):
     fallback after the rule-based path fails.
     """
     llm_schema = _safe_schema_for_llm(schema)
+    column_values = None
+    if engine is not None:
+        try:
+            column_values = get_column_values(engine=engine)
+        except Exception:
+            column_values = {}
 
     current_sql = None
     last_error = None
 
     # First attempt: agentic generation
-    current_sql = _agentic_generate(question, llm_schema, attempt=1)
+    current_sql = _agentic_generate(
+        question, llm_schema, attempt=1, dialect=dialect, column_values=column_values,
+    )
     if not current_sql:
         trace.append("Agentic generation failed or returned unusable SQL")
-        return {
-            "source": SOURCE_FAILED,
-            "sql": None,
-            "result": [],
-            "repair_attempts": 0,
-            "trace": trace,
-            "error": "Could not generate SQL.",
-        }
+        return _result_payload(SOURCE_FAILED, None, [], 0, trace, "Could not generate SQL.")
 
     attempt = 1
     while attempt <= MAX_REPAIR_ATTEMPTS:
@@ -315,7 +386,8 @@ def _agentic_flow(question, schema, trace, role="user", repair_attempts=0):
                 break
             current_sql = _agentic_generate(
                 question, llm_schema,
-                previous_sql=current_sql, error=last_error, attempt=attempt + 1
+                previous_sql=current_sql, error=last_error, attempt=attempt + 1,
+                dialect=dialect, column_values=column_values,
             )
             repair_attempts += 1
             if current_sql:
@@ -326,11 +398,7 @@ def _agentic_flow(question, schema, trace, role="user", repair_attempts=0):
         trace.append("SQL validation passed")
 
         # Execute
-        conn = get_db_connection()
-        try:
-            result, err = _execute(conn, current_sql)
-        finally:
-            conn.close()
+        result, columns, err = _execute_on_target(current_sql, engine=engine)
 
         if err is None:
             # A clean run that matched nothing is not automatically a right
@@ -350,7 +418,8 @@ def _agentic_flow(question, schema, trace, role="user", repair_attempts=0):
                 current_sql = _agentic_generate(
                     question, llm_schema,
                     previous_sql=current_sql, error=EMPTY_RESULT_HINT,
-                    attempt=attempt + 1
+                    attempt=attempt + 1,
+                    dialect=dialect, column_values=column_values,
                 )
                 repair_attempts += 1
                 if current_sql:
@@ -370,14 +439,9 @@ def _agentic_flow(question, schema, trace, role="user", repair_attempts=0):
             source = SOURCE_AGENTIC_SELF_HEALED if repair_attempts > 0 else SOURCE_AGENTIC
             if source == SOURCE_AGENTIC_SELF_HEALED:
                 trace.append(f"Agentic engine corrected SQL after {repair_attempts} attempt(s)")
-            return {
-                "source": source,
-                "sql": current_sql,
-                "result": result or [],
-                "repair_attempts": repair_attempts,
-                "trace": trace,
-                "error": None,
-            }
+            return _result_payload(
+                source, current_sql, result, repair_attempts, trace, None, columns,
+            )
 
         # Execution failed - repair
         last_error = err
@@ -388,7 +452,8 @@ def _agentic_flow(question, schema, trace, role="user", repair_attempts=0):
 
         current_sql = _agentic_generate(
             question, llm_schema,
-            previous_sql=current_sql, error=last_error, attempt=attempt + 1
+            previous_sql=current_sql, error=last_error, attempt=attempt + 1,
+            dialect=dialect, column_values=column_values,
         )
         repair_attempts += 1
         if current_sql:
@@ -400,11 +465,7 @@ def _agentic_flow(question, schema, trace, role="user", repair_attempts=0):
 
     # ---------------- 3. FAILED ----------------
     trace.append("All attempts failed")
-    return {
-        "source": SOURCE_FAILED,
-        "sql": current_sql,
-        "result": [],
-        "repair_attempts": repair_attempts,
-        "trace": trace,
-        "error": last_error or "Query could not be completed.",
-    }
+    return _result_payload(
+        SOURCE_FAILED, current_sql, [], repair_attempts, trace,
+        last_error or "Query could not be completed.",
+    )

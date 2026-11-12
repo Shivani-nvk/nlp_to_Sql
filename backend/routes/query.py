@@ -57,8 +57,11 @@ def run_query():
         "used_ai_fallback": result["source"] in ("agentic", "agentic_self_healed"),
     }
 
-    if result["error"] and result["source"] == "failed":
+    if result["error"] and result["source"] in ("failed", "unanswerable"):
         response["error"] = result["error"]
-        return jsonify(response), 500
+        # 400 for "your question isn't answerable" - the request was
+        # understood, it just doesn't refer to anything in this database.
+        # 500 stays reserved for a genuine failure of a real query.
+        return jsonify(response), (400 if result["source"] == "unanswerable" else 500)
 
     return jsonify(response)
